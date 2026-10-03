@@ -13,14 +13,28 @@ endpoint, because that is the only one that accepts `options.num_ctx` — see
 
 ## Requirements
 
+- **Linux or macOS.** The scripts (`setup.sh`, `run.sh`, `claude-ollama`,
+  `vscode-setup.sh`) are bash, not POSIX sh. Developed and tested on Linux x64;
+  macOS is untested.
+- `bash`, `curl` and `python3` on PATH
 - Python 3.9+ (3.14 works; the proxy has no version-specific dependencies)
 - Ollama running somewhere you can reach, with a model that supports tool calling
-- Claude Code — either already on your PATH, or fetched into this checkout (below)
+- Claude Code on your PATH: `curl -fsSL https://claude.ai/install.sh | bash`
+
+### Windows
+
+Not supported yet. The proxy itself is portable — plain Python with no
+OS-specific code — so what is missing is the shell layer: `setup.sh`, the
+`claude-ollama` launcher and `vscode-setup.sh` would need PowerShell equivalents.
+
+WSL2 works today with no changes — it is Linux as far as these scripts are
+concerned. Note that Ollama running on the Windows host is reachable from WSL2
+over the host's address rather than `localhost`, so `OLLAMA_BASE_URL` has to point
+there.
 
 ## Setup
 
 ```sh
-./fetch-claude.sh   # optional: put the claude binary in ./bin
 ./setup.sh
 ```
 
@@ -34,54 +48,13 @@ it elsewhere (`BIN_DIR=~/bin ./setup.sh`). If a real file already sits at that
 name, setup says so and leaves it alone. Setup also tells you if the directory is
 not on your PATH.
 
-### Keeping Claude Code inside the checkout
-
-The official installer (`curl -fsSL https://claude.ai/install.sh | bash`) always
-installs to `~/.local/share/claude/versions/` with a symlink at
-`~/.local/bin/claude`; its `[target]` argument picks a *version*, not a path, and
-no environment variable redirects it.
-
-`./fetch-claude.sh` gets the same result inside the repo instead. It resolves a
-version from the same release channel, downloads the same standalone binary for
-your platform, verifies the same SHA256 from the release manifest, and writes it
-to `./bin/claude`:
-
-```sh
-./fetch-claude.sh            # stable (default)
-./fetch-claude.sh latest
-./fetch-claude.sh 2.1.285    # pin an exact version
-```
-
-`bin/` is gitignored — the binary is around 240MB, so it must not be committed.
-The installed version is recorded in `bin/.version`.
-
-`claude-ollama` uses the checkout's `bin/claude` when it exists and falls back to
-whatever is on your PATH, so an existing `~/.local/bin` install keeps working untouched. The
-launcher also sets `DISABLE_AUTOUPDATER=1` so the in-repo copy stays at the
-version you fetched; re-run `./fetch-claude.sh` to move it.
-
-Edit `.env` so `OLLAMA_BASE_URL` and the model names match your setup, then run
-it from whatever project you want to work in:
-
-```sh
-cd ~/some/other/project
-claude-ollama
-```
-
-It starts the proxy if it is not already up, exports the environment Claude Code
-needs, and launches it. Arguments pass straight through (`claude-ollama -p "hi"`).
-
-`claude-ollama` resolves its own symlink to locate this checkout and deliberately
-does not change directory, so Claude Code starts in the project you invoked it
-from — the checkout only supplies the proxy, the config and the binary.
-
 ### Watching what the proxy does
 
 The proxy logs one line per request, which is how you confirm traffic is actually
 reaching Ollama:
 
 ```
-claude-opus-5 -> qwen3:8b (3 messages, 14 tools, stream=True)
+claude-opus-5 -> qwen3.5:9b (3 messages, 14 tools, stream=True)
 ```
 
 When `claude-ollama` starts the proxy itself it writes that log to `proxy.log` in
@@ -96,6 +69,65 @@ Set `CLAUDE_OLLAMA_LOG` to put it somewhere else. To follow it live in a termina
 of its own instead, start the proxy in the foreground with `./run.sh` from the
 checkout before launching — `claude-ollama` reuses a proxy that is already up
 rather than starting a second one.
+
+## Editor integration (VS Code, JetBrains)
+
+The `claude-ollama` launcher does two things an editor extension does not: it sets
+the environment Claude Code needs, and it starts the proxy. An extension finds
+`claude` on your PATH and runs it directly, so it gets neither — Claude Code sees
+no credentials and shows a login screen. Fix both halves.
+
+### 1. Keep the proxy running
+
+Nothing starts it for you here, so install it as a systemd user service:
+
+```sh
+./vscode-setup.sh --print-service > ~/.config/systemd/user/claude-ollama.service
+systemctl --user daemon-reload
+systemctl --user enable --now claude-ollama
+systemctl --user status claude-ollama
+```
+
+Paths in the generated unit are absolute and taken from this checkout. After
+changing `.env`, `systemctl --user restart claude-ollama`. Logs go to the journal
+rather than `proxy.log`: `journalctl --user -u claude-ollama -f`.
+
+### 2. Give the project the environment
+
+```sh
+cd ~/some/project
+/path/to/claude-ollama/vscode-setup.sh
+```
+
+That writes `.claude/settings.local.json` in that project with an `env` block
+pointing Claude Code at the proxy. Claude Code reads `env` from settings
+regardless of what launched it, so the extension picks it up. Existing settings in
+the file are merged, not replaced, and a malformed file is refused rather than
+overwritten.
+
+Values are generated from `.env` through the same loader the proxy uses, so `.env`
+stays the single place settings are edited — re-run the script after changing it.
+Add `.claude/settings.local.json` to that project's `.gitignore`; the script says
+so if it is not already ignored.
+
+Pass `--shared` to write `.claude/settings.json` instead, if you want the setting
+committed for a project that is only ever used this way.
+
+### Why per-project rather than globally
+
+Putting this in `~/.claude/settings.json` would work everywhere, including
+projects where you want the real Claude. Per-project keeps the proxy opt-in, so a
+normal `claude` elsewhere is unaffected.
+
+### Confirming it worked
+
+The login screen disappearing is not proof the requests reach Ollama. Check the
+proxy instead — `journalctl --user -u claude-ollama -f` should show a line per
+request:
+
+```
+claude-opus-5 -> qwen3.5:9b (3 messages, 14 tools, stream=True)
+```
 
 ## Configuration
 
@@ -116,12 +148,13 @@ OLLAMA_BASE_URL=http://gpubox.lan:11434 claude-ollama
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Where Ollama listens |
 | `CLAUDE_OLLAMA_TIMEOUT` | `600` | Request timeout in seconds; also becomes Claude Code's `API_TIMEOUT_MS` |
-| `CLAUDE_OLLAMA_MODEL` | `qwen3:8b` | Model for Claude Code's main requests |
+| `CLAUDE_OLLAMA_MODEL` | `qwen3.5:9b` | Model for Claude Code's main requests |
 | `CLAUDE_OLLAMA_SMALL_MODEL` | unset | Model for its cheap background calls |
-| `CLAUDE_OLLAMA_NUM_CTX` | `32768` | Context window requested from Ollama |
+| `CLAUDE_OLLAMA_NUM_CTX` | `65536` | Context window requested from Ollama |
 | `CLAUDE_OLLAMA_TEMPERATURE` | `0.0` | Used when the request does not specify one |
 | `CLAUDE_OLLAMA_THINKING` | `off` | `off` sends `think=false`, `on` sends `think=true`, `auto` omits the field |
 | `CLAUDE_OLLAMA_STRIP_THINKING` | `true` | Remove `<think>…</think>` that leaks into content |
+| `CLAUDE_OLLAMA_DEBUG` | `false` | Log every raw line Ollama returns |
 | `CLAUDE_OLLAMA_HOST` | `127.0.0.1` | Where the proxy listens |
 | `CLAUDE_OLLAMA_PORT` | `8765` | Where the proxy listens |
 
@@ -138,9 +171,13 @@ untouched (so `CLAUDE_OLLAMA_MODEL=qwen3:30b` just works); anything else goes to
 Ollama defaults to a 4096-token context and silently truncates anything longer.
 Claude Code's system prompt and tool schemas are roughly 12–15k tokens *before*
 your conversation starts, so at the default you would lose the tool definitions
-and the agent would flail. `defaults.num_ctx` is therefore set to 32768; do not
-drop it below about 16384. Raising it costs VRAM, so a model that fits
-comfortably at 4k may not fit at 32k.
+and the agent would flail. `CLAUDE_OLLAMA_NUM_CTX` is therefore set to 65536; do
+not drop it below about 16384.
+
+The upper bound is your VRAM, not the model: `qwen3.5` is 256K-native, but
+`num_ctx` allocates KV cache whether the conversation fills it or not. Raise it in
+steps and watch for a sudden slowdown, which is Ollama spilling layers to CPU.
+`CLAUDE_OLLAMA_MODEL=qwen3.5:9b` is a 6.6GB Q4_K_M download before any KV cache.
 
 ## What gets translated
 
@@ -192,6 +229,47 @@ If you still see that warning, the request is exceeding Claude Code's own ceilin
 rather than looking stalled: raise `CLAUDE_OLLAMA_TIMEOUT`, which also sets
 `API_TIMEOUT_MS`. A smaller `CLAUDE_OLLAMA_NUM_CTX` cuts prompt-evaluation time
 directly, at the cost of how much history fits.
+
+## When a turn finishes but nothing changed
+
+Claude Code says something like `Brewed for 45s · done` and no file is touched.
+Three different things produce that, and the proxy log names which:
+
+```
+done: prompt=14233 eval=61 reason=stop tools=0 text=0 thinking=612
+WARNING model returned 612 characters of reasoning and nothing else
+```
+
+**All output was reasoning.** The model put its whole reply inside
+`<think>…</think>`, stripping removed it, and the turn ends with an empty message.
+Set `CLAUDE_OLLAMA_STRIP_THINKING=false` to see what it said, or
+`CLAUDE_OLLAMA_THINKING=on` so Ollama returns reasoning in its own field instead
+of inline. Counter-intuitively `CLAUDE_OLLAMA_THINKING=off` does not prevent this
+— a model can ignore the flag and emit the tags anyway.
+
+```
+done: prompt=14233 eval=12 reason=stop tools=0 text=32 thinking=0
+WARNING model wrote 32 characters of prose but called none of the 1 tools offered
+```
+
+**It described the edit instead of making it.** The model answered in prose rather
+than emitting a tool call, so Claude Code had nothing to execute. This is the
+commonest small-model failure and it is not a proxy fault — see
+[What to expect from small models](#what-to-expect-from-small-models). Retrying,
+or a larger tool-calling model, is the only fix.
+
+```
+done: prompt=31992 eval=4001 reason=length tools=0 text=0 thinking=8800
+```
+
+**It ran out of room.** `reason=length` means the reply hit `num_predict`, and a
+`prompt` close to `CLAUDE_OLLAMA_NUM_CTX` means the request itself nearly filled
+the window — the tool definitions may have been truncated away before the model
+ever saw them.
+
+For anything these three do not explain, set `CLAUDE_OLLAMA_DEBUG=true` and
+restart the proxy: every raw line Ollama returns is logged, so you can see exactly
+what the model emitted and whether Ollama parsed a tool call out of it.
 
 ## What to expect from small models
 
@@ -323,7 +401,8 @@ billing. Caching is left enabled and `cache_control` simply discarded.
 **Hypothesis, not a result:** for agentic coding the binding constraint is
 tool-calling reliability across long multi-turn contexts, not code-generation
 quality, so a code-specialised model (`qwen2.5-coder:7b`) is not automatically
-preferable to a newer general model trained for agentic use (`qwen3:8b`). Both
+preferable to a newer general model trained for agentic use (`qwen3:8b`, since
+superseded by `qwen3.5:9b`). Both
 declare `tools` support in Ollama's library; `qwen3` additionally declares
 `thinking`. *(Capability tags verified; the comparative claim is untested and
 stated as a hypothesis.)*
@@ -339,19 +418,22 @@ stated as a hypothesis.)*
   estimate. It is now measurable: the proxy logs `done: prompt=N eval=N
   reason=X` per request, where `prompt` is Ollama's own `prompt_eval_count`.
   Read it from `proxy.log` and report the measured value.
-- **Context ceiling.** `num_ctx` is set to 32768, at or near the native limit of
-  both candidate models; going higher needs YaRN scaling rather than a larger
-  number. Confirm per model with `ollama show`.
+- **Context ceiling — no longer binding.** With `qwen3:8b` (40K native) the
+  32768-token setting sat just under the ceiling and going further would have
+  needed YaRN scaling. `qwen3.5:9b` is 256K-native, so the limit moved to VRAM;
+  `num_ctx` is now 65536 and could go higher. Confirm per model with
+  `ollama show`.
 
 ### Environment of record
 
 | Component | Version |
 | --- | --- |
-| Claude Code | 2.1.285 (stable channel), `linux-x64`, Bun 1.4.3 single-file executable |
-| Model under test | `qwen3:8b` via Ollama |
+| Host OS | Linux x64 (Fedora, kernel 7.1.12). macOS untested; Windows unsupported — the shell layer is bash |
+| Claude Code | installed via `claude.ai/install.sh` to `~/.local/bin`; a Bun single-file executable. **Record `claude --version` per run** — the repo does not pin it and the installer auto-updates |
+| Model under test | `qwen3.5:9b` via Ollama (Q4_K_M, 6.6GB, 256K native context). Switched from `qwen3:8b` on 3 Oct 2026, the day after the qwen3.5 family was published — **pin the digest from `ollama show` for any reported run**, the family is days old and still moving |
 | Proxy runtime | Python 3.14.7, FastAPI + uvicorn + httpx |
-| Proxy implementation | 861 lines across four modules (`translate`, `stream`, `app`, `config`) |
-| Test suite | 44 tests, 640 lines, no Ollama required |
+| Proxy implementation | five modules: `translate`, `stream`, `app`, `config`, `ide` |
+| Test suite | 52 tests, no Ollama required |
 
 Reproducing a measurement run: `./run.sh` in the checkout, `claude-ollama` in the
 project under test, then read `proxy.log` — one line per request giving the

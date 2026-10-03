@@ -283,9 +283,15 @@ class ThinkFilter:
         self.enabled = enabled
         self._buf = ""
         self._inside = False
+        # Counted so callers can tell "the model only produced reasoning" apart
+        # from "the model produced nothing".
+        self.fed = 0
+        self.emitted = 0
 
     def feed(self, chunk: str) -> str:
+        self.fed += len(chunk)
         if not self.enabled:
+            self.emitted += len(chunk)
             return chunk
         self._buf += chunk
         emitted: list[str] = []
@@ -309,7 +315,9 @@ class ThinkFilter:
             emitted.append(self._buf[:start])
             self._buf = self._buf[start + len(self.OPEN) :]
             self._inside = True
-        return "".join(emitted)
+        out = "".join(emitted)
+        self.emitted += len(out)
+        return out
 
     def flush(self) -> str:
         """Anything still held back once the stream ends."""
@@ -317,7 +325,13 @@ class ThinkFilter:
             return ""
         tail = "" if self._inside else self._buf
         self._buf = ""
+        self.emitted += len(tail)
         return tail
 
     def strip(self, text: str) -> str:
         return self.feed(text) + self.flush()
+
+    @property
+    def stripped(self) -> int:
+        """Characters removed as reasoning."""
+        return max(0, self.fed - self.emitted)

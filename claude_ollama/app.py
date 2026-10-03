@@ -143,6 +143,11 @@ async def _post_chat(client: httpx.AsyncClient, payload: dict) -> dict | JSONRes
 def main() -> None:
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = config_module.load()
+    logging.basicConfig(
+        level=logging.DEBUG if cfg.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    # httpx logs every request itself, which doubles the log for no gain.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, log_level="warning")

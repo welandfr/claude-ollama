@@ -49,12 +49,13 @@ class Config:
     timeout: float = 600.0
     host: str = "127.0.0.1"
     port: int = 8765
-    num_ctx: int = 32768
+    num_ctx: int = 65536
     temperature: float = 0.0
     thinking: str = "off"
     strip_thinking: bool = True
-    default_model: str = "qwen3:8b"
+    default_model: str = "qwen3.5:9b"
     small_model: str = ""
+    debug: bool = False
 
     def resolve_model(self, requested: str | None) -> str:
         """Map a model id from Claude Code onto an Ollama model name."""
@@ -62,7 +63,7 @@ class Config:
         low = name.lower()
         if self.small_model and ("haiku" in low or "small" in low):
             return self.small_model
-        # A bare Ollama name (CLAUDE_OLLAMA_MODEL=qwen3:8b) passes straight through.
+        # A bare Ollama name (CLAUDE_OLLAMA_MODEL=qwen3.5:9b) passes straight through.
         if name and not low.startswith("claude"):
             return name
         return self.default_model or name
@@ -107,6 +108,7 @@ def load(env_path: str | os.PathLike[str] | None = None) -> Config:
         strip_thinking=flag("CLAUDE_OLLAMA_STRIP_THINKING", Config.strip_thinking),
         default_model=get("CLAUDE_OLLAMA_MODEL", Config.default_model),
         small_model=get("CLAUDE_OLLAMA_SMALL_MODEL", ""),
+        debug=flag("CLAUDE_OLLAMA_DEBUG", Config.debug),
     )
     if cfg.thinking not in {"off", "on", "auto"}:
         cfg.thinking = "auto"

@@ -4,6 +4,3 @@ __pycache__/
 .pytest_cache/
 .env
 proxy.log
-
-# Claude Code binary fetched by ./fetch-claude.sh (~240MB)
-bin/

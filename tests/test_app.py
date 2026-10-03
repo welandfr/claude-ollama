@@ -300,3 +300,90 @@ async def test_pings_go_out_while_ollama_is_silent(monkeypatch):
     assert names[0] == "message_start"
     assert names.count("ping") >= 3, names
     assert names[-1] == "message_stop"
+
+
+@pytest.mark.asyncio
+async def test_all_thinking_output_is_reported_not_silent(caplog):
+    """The hardest symptom to diagnose: a turn that changes nothing.
+
+    If the model puts its whole reply inside <think>, stripping leaves an empty
+    message and Claude Code shows "done" with no edit. The log has to say so.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=ndjson(
+                {"message": {"content": "<think>I should edit the file</think>"}, "done": False},
+                {"message": {"content": ""}, "done": True, "done_reason": "stop"},
+            ),
+        )
+
+    with caplog.at_level("WARNING"):
+        async with make_client(handler) as client:
+            reply = await client.post(
+                "/v1/messages",
+                json={"model": "x", "stream": True, "messages": [{"role": "user", "content": "edit"}]},
+            )
+
+    assert "reasoning and nothing else" in caplog.text
+    assert "STRIP_THINKING" in caplog.text  # names the way out
+    names = [n for n, _ in parse_sse(reply.text)]
+    assert names[-1] == "message_stop"  # still a well-formed response
+
+
+@pytest.mark.asyncio
+async def test_prose_instead_of_a_tool_call_is_reported(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=ndjson(
+                {"message": {"content": "You should change line 3 to foo."}, "done": False},
+                {"message": {"content": ""}, "done": True, "done_reason": "stop"},
+            ),
+        )
+
+    with caplog.at_level("WARNING"):
+        async with make_client(handler) as client:
+            await client.post(
+                "/v1/messages",
+                json={
+                    "model": "x",
+                    "stream": True,
+                    "tools": [{"name": "Edit", "description": "e", "input_schema": {"type": "object"}}],
+                    "messages": [{"role": "user", "content": "edit"}],
+                },
+            )
+
+    assert "called none of the 1 tools offered" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_real_tool_call_warns_about_nothing(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=ndjson(
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "Edit", "arguments": {"path": "a"}}}],
+                    },
+                    "done": True,
+                    "done_reason": "stop",
+                },
+            ),
+        )
+
+    with caplog.at_level("WARNING"):
+        async with make_client(handler) as client:
+            await client.post(
+                "/v1/messages",
+                json={
+                    "model": "x",
+                    "stream": True,
+                    "tools": [{"name": "Edit", "description": "e", "input_schema": {"type": "object"}}],
+                    "messages": [{"role": "user", "content": "edit"}],
+                },
+            )
+
+    assert caplog.text == "" or "tools offered" not in caplog.text

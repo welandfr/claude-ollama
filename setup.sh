@@ -35,7 +35,7 @@ echo "installing dependencies"
 ./.venv/bin/python -m pip install --quiet --upgrade pip
 ./.venv/bin/python -m pip install --quiet -r requirements.txt
 
-chmod +x run.sh claude-ollama fetch-claude.sh
+chmod +x run.sh claude-ollama vscode-setup.sh
 
 # Put claude-ollama on PATH so it can be used from any project directory. The
 # symlink points back here, and the launcher resolves it to find this checkout.
@@ -56,14 +56,11 @@ fi
 echo
 echo "--- checks ---"
 
-if [ -x bin/claude ]; then
-  echo "claude:  ./bin/claude ($(cat bin/.version 2>/dev/null || echo unknown)) -- used in preference to PATH"
-elif command -v claude >/dev/null 2>&1; then
-  echo "claude:  $(command -v claude) (on PATH)"
-  echo "           run ./fetch-claude.sh to keep a copy in this checkout instead"
+if command -v claude >/dev/null 2>&1; then
+  echo "claude:  $(command -v claude) ($(claude --version 2>/dev/null || echo 'version unknown'))"
 else
-  echo "claude:  NOT FOUND. Fetch it into this checkout with:"
-  echo "           ./fetch-claude.sh"
+  echo "claude:  NOT FOUND. Install it with:"
+  echo "           curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
 base_url=$(./.venv/bin/python -c 'from claude_ollama import config; print(config.load().base_url)')

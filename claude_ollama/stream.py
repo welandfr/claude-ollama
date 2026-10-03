@@ -109,6 +109,9 @@ async def _attempt(
     stop_reason = "end_turn"
     usage = {"input_tokens": 0, "output_tokens": 0}
     failure: str | None = None
+    text_chars = 0
+    tool_count = 0
+    offered_tools = len(payload.get("tools") or [])
 
     def open_text() -> tuple[int, str]:
         nonlocal next_index
@@ -148,6 +151,8 @@ async def _attempt(
             line = str(value).strip()
             if not line:
                 continue
+            if cfg.debug:
+                log.debug("ollama <- %s", line[:2000])
             try:
                 event: dict[str, Any] = json.loads(line)
             except json.JSONDecodeError:
@@ -160,6 +165,7 @@ async def _attempt(
             message = event.get("message") or {}
 
             piece = think.feed(message.get("content") or "")
+            text_chars += len(piece)
             if piece:
                 if text_index is None:
                     text_index, start = open_text()
@@ -211,19 +217,23 @@ async def _attempt(
                 )
                 yield sse("content_block_stop", {"type": "content_block_stop", "index": index})
                 stop_reason = "tool_use"
+                tool_count += 1
 
             if event.get("done"):
                 usage = {
                     "input_tokens": int(event.get("prompt_eval_count") or 0),
                     "output_tokens": int(event.get("eval_count") or 0),
                 }
-                # Logged because prompt size against num_ctx is the number that
-                # decides whether the context window is actually big enough.
+                # prompt= against num_ctx says whether the context window is big
+                # enough; tools= and text= say whether the model actually acted.
                 log.info(
-                    "done: prompt=%d eval=%d reason=%s",
+                    "done: prompt=%d eval=%d reason=%s tools=%d text=%d thinking=%d",
                     usage["input_tokens"],
                     usage["output_tokens"],
                     event.get("done_reason", "stop"),
+                    tool_count,
+                    text_chars,
+                    think.stripped,
                 )
                 if stop_reason != "tool_use":
                     stop_reason = STOP_REASONS.get(event.get("done_reason", "stop"), "end_turn")
@@ -238,6 +248,7 @@ async def _attempt(
         return
 
     tail = think.flush()
+    text_chars += len(tail)
     if tail:
         if text_index is None:
             text_index, start = open_text()
@@ -254,10 +265,28 @@ async def _attempt(
     if text_index is not None:
         yield sse("content_block_stop", {"type": "content_block_stop", "index": text_index})
     elif next_index == 0:
+        if think.stripped:
+            log.warning(
+                "model returned %d characters of reasoning and nothing else; "
+                "Claude Code will show an empty turn. Try CLAUDE_OLLAMA_STRIP_THINKING=false "
+                "to see it, or CLAUDE_OLLAMA_THINKING=on so Ollama separates it out.",
+                think.stripped,
+            )
+        else:
+            log.warning("model returned no content at all")
         # Never send a message with no content blocks at all.
         index, start = open_text()
         yield start
         yield sse("content_block_stop", {"type": "content_block_stop", "index": index})
+
+    if offered_tools and not tool_count and text_chars:
+        # The commonest small-model failure: it describes the edit instead of
+        # calling the tool, so the turn ends with nothing changed on disk.
+        log.warning(
+            "model wrote %d characters of prose but called none of the %d tools offered",
+            text_chars,
+            offered_tools,
+        )
 
     yield sse(
         "message_delta",

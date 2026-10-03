@@ -100,6 +100,7 @@ def test_example_file_matches_the_code():
         "CLAUDE_OLLAMA_TEMPERATURE",
         "CLAUDE_OLLAMA_THINKING",
         "CLAUDE_OLLAMA_STRIP_THINKING",
+        "CLAUDE_OLLAMA_DEBUG",
         "CLAUDE_OLLAMA_HOST",
         "CLAUDE_OLLAMA_PORT",
     }

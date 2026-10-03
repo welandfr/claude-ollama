@@ -20,14 +20,9 @@ fi
 # to be on sys.path explicitly now that the working directory is the caller's.
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
-# Prefer the binary in the checkout, so the repo pins its own version
-# independently of any ~/.local/bin install.
-if [ -x "$REPO/bin/claude" ]; then
-  CLAUDE_BIN="$REPO/bin/claude"
-elif command -v claude >/dev/null 2>&1; then
-  CLAUDE_BIN="$(command -v claude)"
-else
-  echo "no claude binary found; run $REPO/fetch-claude.sh" >&2
+if ! command -v claude >/dev/null 2>&1; then
+  echo "claude is not on your PATH; install it with:" >&2
+  echo "  curl -fsSL https://claude.ai/install.sh | bash" >&2
   exit 1
 fi
 
@@ -83,7 +78,5 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # Prompt caching is deliberately left alone: the proxy ignores cache_control, and
 # DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
 # apply to a local model.
-# The pinned binary should not silently replace itself; use ./fetch-claude.sh.
-export DISABLE_AUTOUPDATER=1
 
-"$CLAUDE_BIN" "$@"
+claude "$@"
