@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Starts the proxy if it is not already running, then launches Claude Code
+# pointed at it. Any arguments are passed through to claude.
+#
+# Safe to symlink onto your PATH and run from any project: this resolves its own
+# location to find the checkout and deliberately does NOT change directory, so
+# claude starts in whatever project you invoked it from.
+set -euo pipefail
+
+# python3 is a hard requirement anyway, and realpath/readlink -f are not portable.
+SELF="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+REPO="$(dirname "$SELF")"
+
+if [ ! -x "$REPO/.venv/bin/python" ]; then
+  echo "run $REPO/setup.sh first" >&2
+  exit 1
+fi
+
+# The package is imported from the checkout rather than installed, so it needs
+# to be on sys.path explicitly now that the working directory is the caller's.
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+
+# Prefer the binary in the checkout, so the repo pins its own version
+# independently of any ~/.local/bin install.
+if [ -x "$REPO/bin/claude" ]; then
+  CLAUDE_BIN="$REPO/bin/claude"
+elif command -v claude >/dev/null 2>&1; then
+  CLAUDE_BIN="$(command -v claude)"
+else
+  echo "no claude binary found; run $REPO/fetch-claude.sh" >&2
+  exit 1
+fi
+
+# Ask the proxy's own config loader for these, so the launcher cannot drift from
+# it on precedence or defaults.
+eval "$("$REPO/.venv/bin/python" - <<'PY'
+from claude_ollama import config
+c = config.load()
+print(f"PROXY_HOST={c.host}")
+print(f"PROXY_PORT={c.port}")
+print(f"MAIN_MODEL={c.default_model}")
+print(f"SMALL_MODEL={c.small_model or c.default_model}")
+print(f"TIMEOUT_MS={int(c.timeout * 1000)}")
+PY
+)"
+
+BASE_URL="http://${PROXY_HOST}:${PROXY_PORT}"
+PROXY_PID=""
+
+if curl -fsS -m 2 "$BASE_URL/health" >/dev/null 2>&1; then
+  echo "using the proxy already running at $BASE_URL"
+else
+  # Redirect to a file: a background job inherits this terminal, and the proxy's
+  # per-request log would otherwise be drawn straight over Claude Code's TUI.
+  LOG="${CLAUDE_OLLAMA_LOG:-$REPO/proxy.log}"
+  echo "starting proxy on $BASE_URL (log: $LOG)"
+  "$REPO/.venv/bin/python" -m claude_ollama >>"$LOG" 2>&1 &
+  PROXY_PID=$!
+  trap '[ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true' EXIT
+
+  for _ in $(seq 40); do
+    curl -fsS -m 2 "$BASE_URL/health" >/dev/null 2>&1 && break
+    kill -0 "$PROXY_PID" 2>/dev/null || {
+      echo "proxy exited during startup; last lines of $LOG:" >&2
+      tail -n 15 "$LOG" >&2
+      exit 1
+    }
+    sleep 0.25
+  done
+fi
+
+# A non-empty token keeps Claude Code from trying to log in; the proxy ignores it.
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export ANTHROPIC_AUTH_TOKEN="ollama"
+export ANTHROPIC_MODEL="$MAIN_MODEL"
+export ANTHROPIC_SMALL_FAST_MODEL="$SMALL_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MAIN_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MAIN_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
+export API_TIMEOUT_MS="$TIMEOUT_MS"
+# Stops Claude Code reaching out to Anthropic for telemetry it cannot use here.
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+# Prompt caching is deliberately left alone: the proxy ignores cache_control, and
+# DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
+# apply to a local model.
+# The pinned binary should not silently replace itself; use ./fetch-claude.sh.
+export DISABLE_AUTOUPDATER=1
+
+"$CLAUDE_BIN" "$@"
