@@ -76,6 +76,36 @@ else
   echo "ollama:  NOT reachable at $base_url -- fix OLLAMA_BASE_URL in .env"
 fi
 
+# setup.sh deliberately does not restart anything — it cannot know whether the
+# proxy is a systemd unit, a ./run.sh terminal or a launcher-started background
+# job. But a proxy left running on older code is the thing you would hit next,
+# so say so.
+./.venv/bin/python - <<'PY' || true
+import json
+import urllib.error
+import urllib.request
+
+from claude_ollama import config, preflight
+
+cfg = config.load()
+url = f"http://{cfg.host}:{cfg.port}/health"
+try:
+    with urllib.request.urlopen(url, timeout=2) as reply:
+        health = json.load(reply)
+except (urllib.error.URLError, OSError, ValueError):
+    print(f"proxy:   not running at {cfg.host}:{cfg.port} -- claude-ollama starts one on demand")
+else:
+    drift = preflight.proxy_mismatch(health, cfg)
+    if drift:
+        print(f"proxy:   running at {cfg.host}:{cfg.port} but NOT matching this checkout:")
+        for item in drift:
+            print(f"           - {item}")
+        print("         restart it:")
+        print("           systemctl --user restart claude-ollama   (or pkill -f claude_ollama)")
+    else:
+        print(f"proxy:   running at {cfg.host}:{cfg.port}, matches this checkout")
+PY
+
 case ":$PATH:" in
   *":$LINK_DIR:"*) echo "path:    $LINK_DIR is on your PATH" ;;
   *) echo "path:    $LINK_DIR is NOT on your PATH -- add it to your shell profile:"

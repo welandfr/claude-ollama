@@ -71,3 +71,29 @@ def test_service_unit_uses_absolute_paths(tmp_path):
     unit = service_unit(CFG, tmp_path)
     assert f"ExecStart={tmp_path}/.venv/bin/python -m claude_ollama" in unit
     assert f"Environment=PYTHONPATH={tmp_path}" in unit
+
+
+def test_status_line_is_added_when_absent(tmp_path):
+    path = write_settings(tmp_path, env_block(CFG), shared=False)
+    data = json.loads(path.read_text())
+    assert data["statusLine"]["type"] == "command"
+    assert data["statusLine"]["command"].endswith("statusline.py")
+
+
+def test_an_existing_status_line_is_left_alone(tmp_path):
+    """Someone's own status line is theirs; only fill in a missing one."""
+    target = tmp_path / ".claude"
+    target.mkdir()
+    mine = {"type": "command", "command": "/home/me/my-statusline.sh"}
+    (target / "settings.local.json").write_text(json.dumps({"statusLine": mine}))
+    path = write_settings(tmp_path, env_block(CFG), shared=False)
+    assert json.loads(path.read_text())["statusLine"] == mine
+
+
+def test_print_settings_emits_valid_json_for_the_settings_flag(capsys):
+    """The launcher passes this to `claude --settings`, so it must parse."""
+    assert main(["--print-settings"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["statusLine"]["type"] == "command"
+    assert data["statusLine"]["command"].endswith("statusline.py")
+    assert len(data) == 1  # nothing else leaks into every session

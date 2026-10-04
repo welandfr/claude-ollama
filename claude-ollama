@@ -105,4 +105,16 @@ export DISABLE_AUTOUPDATER=1
 # DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
 # apply to a local model.
 
-claude "$@"
+# Carry the status line as session settings rather than installing it into every
+# project. Flag settings outrank project ones, so this wins wherever you launch.
+# CLAUDE_OLLAMA_NO_STATUSLINE=1 keeps whatever status line you already have.
+SESSION_SETTINGS=""
+if [ "${CLAUDE_OLLAMA_NO_STATUSLINE:-0}" != "1" ]; then
+  SESSION_SETTINGS=$("$REPO/.venv/bin/python" -m claude_ollama.ide --print-settings 2>/dev/null || true)
+fi
+
+if [ -n "$SESSION_SETTINGS" ]; then
+  claude --settings "$SESSION_SETTINGS" "$@"
+else
+  claude "$@"
+fi

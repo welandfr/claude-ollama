@@ -293,7 +293,14 @@ async def _attempt(
         {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": usage["output_tokens"]},
+            # input_tokens belongs in message_start, but Ollama only reports
+            # prompt_eval_count in its final chunk, so it is unknown until now.
+            # Without it here a client never learns the prompt size for a
+            # streamed response — which is every response Claude Code makes.
+            "usage": {
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+            },
         },
     )
     yield sse("message_stop", {"type": "message_stop"})

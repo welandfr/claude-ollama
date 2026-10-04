@@ -427,3 +427,37 @@ async def test_the_configured_model_warns_about_nothing(caplog):
             )
 
     assert "serving" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_streamed_usage_reports_input_tokens():
+    """Claude Code's context display reads usage from the streamed response.
+
+    Ollama only reports prompt_eval_count when it finishes, so message_start
+    cannot carry it; if message_delta omits it too, the client sees a prompt of
+    zero tokens and shows 0% context used however full the window is.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=ndjson(
+                {"message": {"content": "hi"}, "done": False},
+                {
+                    "message": {"content": ""},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 18432,
+                    "eval_count": 57,
+                },
+            ),
+        )
+
+    async with make_client(handler) as client:
+        reply = await client.post(
+            "/v1/messages",
+            json={"model": "x", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    delta = [d for n, d in parse_sse(reply.text) if n == "message_delta"][0]
+    assert delta["usage"]["input_tokens"] == 18432
+    assert delta["usage"]["output_tokens"] == 57

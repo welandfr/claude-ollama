@@ -50,6 +50,18 @@ there.
 and reports which `claude` binary will be used and whether Ollama
 answers at the configured URL (listing its models).
 
+It does **not** restart a running proxy — it cannot know whether yours is a
+systemd unit, a `./run.sh` terminal or a background job the launcher started. It
+does tell you when one is running on code that no longer matches the checkout,
+which is what you hit after a `git pull`:
+
+```
+proxy:   running at 127.0.0.1:8765 but NOT matching this checkout:
+           - code 3d5f33a6d78c, checkout is 4387d9ac13d6
+         restart it:
+           systemctl --user restart claude-ollama   (or pkill -f claude_ollama)
+```
+
 The symlink goes to `~/.local/bin/claude-ollama` by default; set `BIN_DIR` to put
 it elsewhere (`BIN_DIR=~/bin ./setup.sh`). If a real file already sits at that
 name, setup says so and leaves it alone. Setup also tells you if the directory is
@@ -122,6 +134,44 @@ so if it is not already ignored.
 
 Pass `--shared` to write `.claude/settings.json` instead, if you want the setting
 committed for a project that is only ever used this way.
+
+### Status line
+
+`vscode-setup.sh` also wires up `statusline.py`, which shows the model and
+context usage:
+
+```
+ornith-1.5:9b | Context: 18K/64K (28%)
+```
+
+Claude Code pipes session JSON to it and renders one line; the numbers come from
+`context_window.total_input_tokens` and `context_window.context_window_size`.
+
+It applies two ways, because the two launch routes need different mechanisms:
+
+- **Every `claude-ollama` session, in any directory.** The launcher passes it as
+  `claude --settings '{"statusLine": …}'`, so nothing is installed per project
+  and your own `~/.claude/settings.json` is untouched. Flag settings outrank
+  project ones, so this wins wherever you launch.
+  `CLAUDE_OLLAMA_NO_STATUSLINE=1` keeps whatever status line you already have.
+- **Editor sessions**, which never run the launcher, get it from the project
+  settings `vscode-setup.sh` writes — and only if that file has no `statusLine`
+  of its own, since one you wrote is yours to keep.
+
+A third option, if you want it in sessions that use neither route: put it in
+`~/.claude/settings.json` yourself. The script is model-agnostic, so it works for
+a normal Claude session too — but it would replace the status line you already
+have there.
+
+```json
+"statusLine": { "type": "command", "command": "/path/to/claude-ollama/statusline.py" }
+```
+
+The window it reports is worth watching. It comes from
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so **a window of 200K means that variable is
+not reaching Claude Code** and it has fallen back to its assumption for an
+unrecognised model — which is the condition that silently overflows Ollama. The
+status line is the quickest way to see that it is set correctly.
 
 ### Why per-project rather than globally
 
@@ -262,6 +312,11 @@ tokenizer), `/v1/models` from `/api/tags`, and `/health` for a reachability chec
   dropped; Ollama has no equivalent. Caching is deliberately left *enabled* in
   Claude Code: setting `DISABLE_PROMPT_CACHING=1` only produces a standing warning
   that requests "will be slower and cost more", which is untrue of a local model.
+- **`input_tokens` arrives late.** Ollama reports `prompt_eval_count` only in
+  its final chunk, so `message_start` honestly says zero and the real figure is
+  sent in `message_delta`. A client that reads the prompt size from
+  `message_start` alone will see zero — which is what made the status line show
+  `0/64K (0%)` before `message_delta` carried it too.
 - **No streamed tool arguments.** Ollama delivers a whole arguments object, so each
   `tool_use` block is emitted as one `input_json_delta`.
 

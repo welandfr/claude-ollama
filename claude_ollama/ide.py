@@ -62,6 +62,10 @@ WantedBy=default.target
 """
 
 
+def status_line(repo: Path) -> dict[str, str]:
+    return {"type": "command", "command": str(repo / "statusline.py")}
+
+
 def write_settings(target: Path, values: dict[str, str], shared: bool) -> Path:
     name = "settings.json" if shared else "settings.local.json"
     path = target / ".claude" / name
@@ -76,6 +80,8 @@ def write_settings(target: Path, values: dict[str, str], shared: bool) -> Path:
 
     # Merge rather than replace: the file may already carry hooks or permissions.
     existing["env"] = {**existing.get("env", {}), **values}
+    # Only if there is none: a status line the user wrote is theirs to keep.
+    existing.setdefault("statusLine", status_line(config_module.ROOT))
     path.write_text(json.dumps(existing, indent=2) + "\n")
     return path
 
@@ -94,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         help="write .claude/settings.json (committed) instead of settings.local.json",
     )
     parser.add_argument(
+        "--print-settings",
+        action="store_true",
+        help="print session settings JSON for claude --settings, and exit",
+    )
+    parser.add_argument(
         "--print-service",
         action="store_true",
         help="print a systemd user unit for the proxy and exit",
@@ -101,6 +112,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = config_module.load()
+
+    if args.print_settings:
+        # Passed to `claude --settings` by the launcher, so every session gets
+        # the status line without installing anything per project.
+        print(json.dumps({"statusLine": status_line(config_module.ROOT)}))
+        return 0
 
     if args.print_service:
         print(service_unit(cfg, config_module.ROOT), end="")
@@ -114,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     path = write_settings(target, values, args.shared)
 
     print(f"wrote {path}")
+    if existing_status := json.loads(path.read_text()).get("statusLine"):
+        print(f"  statusLine: {existing_status.get('command', existing_status)}")
     print(f"  ANTHROPIC_BASE_URL={values['ANTHROPIC_BASE_URL']}")
     print(f"  ANTHROPIC_MODEL={values['ANTHROPIC_MODEL']}")
     if not args.shared:
