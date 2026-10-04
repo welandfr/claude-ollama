@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config as config_module
+from . import source
 from .translate import build_request, build_response, system_text, as_blocks
 from .stream import stream_response
 
@@ -53,6 +54,8 @@ def create_app(cfg: config_module.Config | None = None) -> FastAPI:
             "ollama": {"base_url": cfg.base_url, **upstream},
             "default_model": cfg.default_model,
             "num_ctx": cfg.num_ctx,
+            # Lets the launcher notice a proxy still running older code.
+            "code": source.fingerprint(),
         }
 
     @app.get("/v1/models")
@@ -99,6 +102,17 @@ def create_app(cfg: config_module.Config | None = None) -> FastAPI:
 
         payload = build_request(body, cfg)
         model = payload["model"]
+        requested = (body.get("model") or "").strip()
+        if requested and requested not in {cfg.default_model, cfg.small_model}:
+            # Worth saying out loud: it means something on the client side still
+            # names a different model — a settings.json env block, or a model
+            # choice Claude Code persisted for this project.
+            log.warning(
+                "request asked for %r; serving %r from .env instead. Something on "
+                "the Claude Code side still names the old model.",
+                requested,
+                model,
+            )
         client: httpx.AsyncClient = app.state.client
         log.info(
             "%s -> %s (%d messages, %d tools, stream=%s)",

@@ -387,3 +387,43 @@ async def test_a_real_tool_call_warns_about_nothing(caplog):
             )
 
     assert caplog.text == "" or "tools offered" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unexpected_model_name_is_reported(caplog):
+    """A stale ANTHROPIC_MODEL elsewhere would otherwise run the wrong model.
+
+    Unrecognised names pass through verbatim so CLAUDE_OLLAMA_MODEL works, which
+    means a leftover name from a settings file is honoured in silence.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"message": {"content": "ok"}, "done": True, "done_reason": "stop"}
+        )
+
+    with caplog.at_level("WARNING"):
+        async with make_client(handler) as client:
+            await client.post(
+                "/v1/messages",
+                json={"model": "llama3:70b", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    assert "llama3:70b" in caplog.text
+    assert "serving" in caplog.text and CFG.default_model in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_configured_model_warns_about_nothing(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"message": {"content": "ok"}, "done": True, "done_reason": "stop"}
+        )
+
+    with caplog.at_level("WARNING"):
+        async with make_client(handler) as client:
+            await client.post(
+                "/v1/messages",
+                json={"model": CFG.default_model, "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    assert "serving" not in caplog.text

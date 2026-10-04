@@ -11,6 +11,13 @@ It talks to Ollama's native `/api/chat` rather than the OpenAI-compatible
 endpoint, because that is the only one that accepts `options.num_ctx` — see
 [Context size](#context-size), which is the single most important setting here.
 
+The Ollama server itself is configured in the sibling `ollama-docker-api`
+project. Two of its settings have to agree with this one: a context window at
+least as large as `CLAUDE_OLLAMA_NUM_CTX`, and the KV-cache quantization that
+makes that window fit. Since Ollama now serves `/v1/messages` itself, Claude Code
+can also be pointed straight at it with no proxy — see that project's README for
+when each route makes sense.
+
 ## Requirements
 
 - **Linux or macOS.** The scripts (`setup.sh`, `run.sh`, `claude-ollama`,
@@ -107,6 +114,9 @@ overwritten.
 
 Values are generated from `.env` through the same loader the proxy uses, so `.env`
 stays the single place settings are edited — re-run the script after changing it.
+The file is a snapshot, not a live reference, so `claude-ollama` checks it against
+`.env` on startup and tells you when it has gone stale rather than letting the old
+values quietly win.
 Add `.claude/settings.local.json` to that project's `.gitignore`; the script says
 so if it is not already ignored.
 
@@ -161,23 +171,67 @@ OLLAMA_BASE_URL=http://gpubox.lan:11434 claude-ollama
 `CLAUDE_OLLAMA_ENV` can point the loader at a different file, if you want to keep
 several and switch between them.
 
-Model resolution has three rules, in order: a requested id containing `haiku` goes
-to `CLAUDE_OLLAMA_SMALL_MODEL`; an id that is not Anthropic-shaped passes through
-untouched (so `CLAUDE_OLLAMA_MODEL=qwen3:30b` just works); anything else goes to
-`CLAUDE_OLLAMA_MODEL`.
+**`.env` is the only thing that decides which model runs.** Whatever model id
+Claude Code asks for is ignored, with one exception: an id containing `haiku` — its
+cheap background calls — goes to `CLAUDE_OLLAMA_SMALL_MODEL` if you set one.
+
+That is deliberate. Claude Code can ask for a model named in a `settings.json`
+`env` block or persisted from an earlier session, and an earlier version of this
+proxy passed such a name straight through — so a leftover `qwen3:8b` kept running
+qwen3:8b while `.env` said `qwen3.5:9b`, with nothing in the terminal to say so.
+The proxy now serves the configured model and logs the discrepancy:
+
+```
+request asked for 'qwen3:8b'; serving 'qwen3.5:9b' from .env instead. Something on
+the Claude Code side still names the old model.
+```
+
+To change model, edit `.env` or set `CLAUDE_OLLAMA_MODEL` for one run — not
+`ANTHROPIC_MODEL`.
 
 ### Context size
 
 Ollama defaults to a 4096-token context and silently truncates anything longer.
 Claude Code's system prompt and tool schemas are roughly 12–15k tokens *before*
 your conversation starts, so at the default you would lose the tool definitions
-and the agent would flail. `CLAUDE_OLLAMA_NUM_CTX` is therefore set to 65536; do
-not drop it below about 16384.
+and the agent would flail. `CLAUDE_OLLAMA_NUM_CTX` is therefore set to 65536.
+
+**32768 is not enough either**, which is less obvious. It is large enough to hold
+the system prompt and tool schemas, so the agent starts working — but those take
+roughly 15k of it, and the ~17k left over is refilled by a single large `Read` or
+a verbose command. Claude Code compacts, refills, compacts again, and eventually
+reports `Autocompact is thrashing`. Ollama's own documentation puts the floor for
+coding tools at 64k, which matches.
+
+Claude Code is told the same number via `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which
+matters more than it looks. It has no catalog entry for an Ollama model name, so it
+assumes a 200k window and auto-compacts at *that* — happily growing the
+conversation to several times what Ollama accepts, which Ollama then truncates
+without saying so. The launcher and `vscode-setup.sh` both derive this from
+`CLAUDE_OLLAMA_NUM_CTX`, so the two windows cannot drift apart.
+
+You will still see a warning that the model `isn't described by this version's
+model catalog`. That part is unavoidable for a custom model name and is harmless
+once the window is set explicitly.
 
 The upper bound is your VRAM, not the model: `qwen3.5` is 256K-native, but
 `num_ctx` allocates KV cache whether the conversation fills it or not. Raise it in
 steps and watch for a sudden slowdown, which is Ollama spilling layers to CPU.
-`CLAUDE_OLLAMA_MODEL=qwen3.5:9b` is a 6.6GB Q4_K_M download before any KV cache.
+
+Sizing, for a 9B model at Q4_K_M (about 6.5GB of weights): the KV cache for a GQA
+model of that class runs roughly 0.1MB per token at f16, so 64k costs about 8GB —
+which with the weights exceeds a 16GB card. KV quantization on the server roughly
+halves that, for a small quality loss, and brings 65536 within reach:
+
+```sh
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve
+```
+
+As container environment variables if Ollama runs in one. Verify rather than
+trust the arithmetic — `ollama ps` on the Ollama machine prints the allocated
+`CONTEXT` and the `PROCESSOR` split, which must read `100% GPU`. Any CPU split
+means the window is too large for the card, and the slowdown is severe rather
+than fatal, so it is easy to miss.
 
 ## What gets translated
 
@@ -229,6 +283,40 @@ If you still see that warning, the request is exceeding Claude Code's own ceilin
 rather than looking stalled: raise `CLAUDE_OLLAMA_TIMEOUT`, which also sets
 `API_TIMEOUT_MS`. A smaller `CLAUDE_OLLAMA_NUM_CTX` cuts prompt-evaluation time
 directly, at the cost of how much history fits.
+
+## Network isolation
+
+Two separate questions, often conflated.
+
+**Where does conversation content go?** `ANTHROPIC_BASE_URL` decides, and nothing
+else. Prompts, file contents, tool output and model replies go to Ollama and
+nowhere else. This holds for `ollama launch claude` too — it is the same
+mechanism.
+
+**What else does Claude Code talk to?** That is independent of the base URL, and
+pointing at Ollama does not change it. Claude Code recognises these, all of which
+the launcher and `vscode-setup.sh` set:
+
+| Variable | What it stops |
+| --- | --- |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | the umbrella: non-essential calls to Anthropic |
+| `DISABLE_TELEMETRY=1` | usage telemetry |
+| `DISABLE_ERROR_REPORTING=1` | crash and error reports |
+| `DISABLE_AUTOUPDATER=1` | update checks against Anthropic's download service |
+
+Ollama's own Claude Code documentation does not mention any of these, so
+`ollama launch claude` leaves them at their defaults — conversation content is
+local, the side channels are not. If you take the native route and isolation
+matters, set them yourself alongside `ANTHROPIC_BASE_URL`.
+
+Two caveats worth stating rather than implying. `DISABLE_AUTOUPDATER=1` means
+sessions launched this way never self-update — a plain `claude` elsewhere still
+does, so the binary is not frozen, only this path. And OpenTelemetry export is
+opt-in via `CLAUDE_CODE_ENABLE_TELEMETRY` and goes to an endpoint you configure,
+so it is not a leak unless you make one.
+
+This is not an audited claim. It is what the documented switches cover; verifying
+it properly means watching the process's own traffic.
 
 ## When a turn finishes but nothing changed
 
@@ -418,11 +506,14 @@ stated as a hypothesis.)*
   estimate. It is now measurable: the proxy logs `done: prompt=N eval=N
   reason=X` per request, where `prompt` is Ollama's own `prompt_eval_count`.
   Read it from `proxy.log` and report the measured value.
-- **Context ceiling — no longer binding.** With `qwen3:8b` (40K native) the
-  32768-token setting sat just under the ceiling and going further would have
-  needed YaRN scaling. `qwen3.5:9b` is 256K-native, so the limit moved to VRAM;
-  `num_ctx` is now 65536 and could go higher. Confirm per model with
-  `ollama show`.
+- **Context: the limit moved from the model to the card.** With `qwen3:8b` (40K
+  native) the ceiling was the model and going further needed YaRN scaling. The
+  qwen35-family models are 262144-native, so the binding constraint is now VRAM.
+  On 16GB, 65536 needs `OLLAMA_KV_CACHE_TYPE=q8_0` to fit alongside a 9B model.
+  **32768 proved too small in practice**, not for the reason documented above
+  (truncated tool schemas) but a second one: it leaves too little room after the
+  ~15k baseline, so auto-compaction thrashes. Report the measured baseline from
+  `proxy.log`'s `prompt=` rather than the 15k estimate.
 
 ### Environment of record
 
@@ -430,7 +521,7 @@ stated as a hypothesis.)*
 | --- | --- |
 | Host OS | Linux x64 (Fedora, kernel 7.1.12). macOS untested; Windows unsupported — the shell layer is bash |
 | Claude Code | installed via `claude.ai/install.sh` to `~/.local/bin`; a Bun single-file executable. **Record `claude --version` per run** — the repo does not pin it and the installer auto-updates |
-| Model under test | `qwen3.5:9b` via Ollama (Q4_K_M, 6.6GB, 256K native context). Switched from `qwen3:8b` on 3 Oct 2026, the day after the qwen3.5 family was published — **pin the digest from `ollama show` for any reported run**, the family is days old and still moving |
+| Model under test | `ornith-1.5:9b` via Ollama — qwen35 family, 9.0B, Q4_K_M, 262144 native context, digest `e5df7dcdd8a2`. Third model in three days (`qwen3:8b` → `qwen3.5:9b` → this), so **record the digest per run**; the tag alone does not identify the weights |
 | Proxy runtime | Python 3.14.7, FastAPI + uvicorn + httpx |
 | Proxy implementation | five modules: `translate`, `stream`, `app`, `config`, `ide` |
 | Test suite | 52 tests, no Ollama required |

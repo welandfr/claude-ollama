@@ -53,20 +53,24 @@ class Config:
     temperature: float = 0.0
     thinking: str = "off"
     strip_thinking: bool = True
-    default_model: str = "qwen3.5:9b"
+    default_model: str = "ornith-1.5:9b"
     small_model: str = ""
     debug: bool = False
 
     def resolve_model(self, requested: str | None) -> str:
-        """Map a model id from Claude Code onto an Ollama model name."""
-        name = (requested or "").strip()
-        low = name.lower()
+        """Which Ollama model to run for a requested model id.
+
+        The requested name is deliberately NOT honoured, beyond routing the cheap
+        background calls to the small model. Claude Code can ask for a model from
+        a stale settings file or a model choice persisted from an earlier session,
+        and an earlier version passed such a name through verbatim — so a leftover
+        `qwen3:8b` silently ran qwen3:8b even though .env said otherwise. .env is
+        the only thing that decides.
+        """
+        low = (requested or "").strip().lower()
         if self.small_model and ("haiku" in low or "small" in low):
             return self.small_model
-        # A bare Ollama name (CLAUDE_OLLAMA_MODEL=qwen3.5:9b) passes straight through.
-        if name and not low.startswith("claude"):
-            return name
-        return self.default_model or name
+        return self.default_model
 
     def think_field(self) -> bool | None:
         return {"off": False, "on": True}.get(self.thinking)

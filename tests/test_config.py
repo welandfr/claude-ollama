@@ -107,9 +107,22 @@ def test_example_file_matches_the_code():
     assert keys == known
 
 
-def test_small_model_used_for_haiku_and_passthrough_for_bare_names():
-    cfg = Config(default_model="qwen3:8b", small_model="qwen3:1.7b")
+def test_only_env_decides_which_model_runs():
+    """A requested name must never override .env.
+
+    Claude Code can ask for a model named in a stale settings file or persisted
+    from an earlier session; honouring that ran the wrong model silently.
+    """
+    cfg = Config(default_model="qwen3.5:9b", small_model="qwen3:1.7b")
+    assert cfg.resolve_model("claude-opus-5") == "qwen3.5:9b"
+    assert cfg.resolve_model(None) == "qwen3.5:9b"
+    # A leftover Ollama name is ignored, not passed through.
+    assert cfg.resolve_model("qwen3:8b") == "qwen3.5:9b"
+    assert cfg.resolve_model("llama3:70b") == "qwen3.5:9b"
+    # The cheap background calls are the one thing still routed by name.
     assert cfg.resolve_model("claude-haiku-4-5-20251001") == "qwen3:1.7b"
-    assert cfg.resolve_model("claude-opus-5") == "qwen3:8b"
-    assert cfg.resolve_model("qwen3:30b") == "qwen3:30b"
-    assert cfg.resolve_model(None) == "qwen3:8b"
+
+
+def test_haiku_falls_back_to_the_main_model_when_no_small_one_is_set():
+    cfg = Config(default_model="qwen3.5:9b", small_model="")
+    assert cfg.resolve_model("claude-haiku-4-5-20251001") == "qwen3.5:9b"

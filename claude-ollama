@@ -36,11 +36,23 @@ print(f"PROXY_PORT={c.port}")
 print(f"MAIN_MODEL={c.default_model}")
 print(f"SMALL_MODEL={c.small_model or c.default_model}")
 print(f"TIMEOUT_MS={int(c.timeout * 1000)}")
+print(f"NUM_CTX={c.num_ctx}")
+print(f"OLLAMA={c.base_url}")
 PY
 )"
 
 BASE_URL="http://${PROXY_HOST}:${PROXY_PORT}"
 PROXY_PID=""
+
+# Say it out loud: the model actually used comes from .env, not from whatever
+# Claude Code's UI reports, and that difference has caused real confusion.
+echo "model $MAIN_MODEL · ollama $OLLAMA · num_ctx $NUM_CTX"
+
+# Catch the quiet failures — Ollama down, model not pulled, a proxy still running
+# with an older .env — before handing over to Claude Code.
+if [ "${CLAUDE_OLLAMA_SKIP_CHECKS:-0}" != "1" ]; then
+  "$REPO/.venv/bin/python" -m claude_ollama.preflight || exit 1
+fi
 
 if curl -fsS -m 2 "$BASE_URL/health" >/dev/null 2>&1; then
   echo "using the proxy already running at $BASE_URL"
@@ -67,14 +79,28 @@ fi
 # A non-empty token keeps Claude Code from trying to log in; the proxy ignores it.
 export ANTHROPIC_BASE_URL="$BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="ollama"
+# Cleared so a real key already in the environment cannot take precedence.
+export ANTHROPIC_API_KEY=""
 export ANTHROPIC_MODEL="$MAIN_MODEL"
 export ANTHROPIC_SMALL_FAST_MODEL="$SMALL_MODEL"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$MAIN_MODEL"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$MAIN_MODEL"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
 export API_TIMEOUT_MS="$TIMEOUT_MS"
-# Stops Claude Code reaching out to Anthropic for telemetry it cannot use here.
+# Claude Code cannot look up the window of a model it does not know, assumes 200k
+# and compacts at that — which would send prompts far past num_ctx for Ollama to
+# truncate in silence. Keep the two windows equal.
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$NUM_CTX"
+# Nothing below changes where prompts go — ANTHROPIC_BASE_URL already confines
+# conversation content to Ollama. These close the side channels Claude Code opens
+# to Anthropic regardless of which model serves the session.
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export DISABLE_TELEMETRY=1
+export DISABLE_ERROR_REPORTING=1
+# Also an isolation setting: the updater contacts Anthropic on its own schedule.
+# The trade-off is that sessions launched this way never self-update; a plain
+# `claude` elsewhere still does.
+export DISABLE_AUTOUPDATER=1
 # Prompt caching is deliberately left alone: the proxy ignores cache_control, and
 # DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
 # apply to a local model.

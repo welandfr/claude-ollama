@@ -16,6 +16,9 @@ def test_env_block_points_at_the_proxy():
     assert values["ANTHROPIC_MODEL"] == "qwen3:8b"
     assert values["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3:1.7b"
     assert values["API_TIMEOUT_MS"] == "300000"
+    # Must match num_ctx, or Claude Code compacts at its assumed 200k and Ollama
+    # truncates the overflow without saying so.
+    assert values["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(Config.num_ctx)
     # A non-empty token is what keeps Claude Code from showing a login screen.
     assert values["ANTHROPIC_AUTH_TOKEN"]
 

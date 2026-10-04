@@ -26,13 +26,22 @@ def env_block(cfg: config_module.Config) -> dict[str, str]:
     return {
         "ANTHROPIC_BASE_URL": f"http://{cfg.host}:{cfg.port}",
         "ANTHROPIC_AUTH_TOKEN": "ollama",
+        # Cleared so a real key in the environment cannot take precedence.
+        "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_MODEL": main_model,
         "ANTHROPIC_SMALL_FAST_MODEL": small_model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": main_model,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": main_model,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": small_model,
         "API_TIMEOUT_MS": str(int(cfg.timeout * 1000)),
+        # Claude Code assumes 200k for a model it does not recognise; without this
+        # it compacts at that and Ollama silently truncates the overflow.
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(cfg.num_ctx),
+        # Side channels to Anthropic, independent of where prompts go.
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "DISABLE_AUTOUPDATER": "1",
     }
 
 
