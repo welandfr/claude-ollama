@@ -40,6 +40,8 @@ def env_block(cfg: config_module.Config) -> dict[str, str]:
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(cfg.num_ctx),
         # Or the Default row in /model switches to a "[1m]" variant and a 1M window.
         "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
+        # Its default 32000 makes Claude Code compact at half of a 64K window.
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(cfg.max_output),
         # Side channels to Anthropic, independent of where prompts go.
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "DISABLE_TELEMETRY": "1",

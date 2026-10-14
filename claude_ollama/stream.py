@@ -11,6 +11,12 @@ response headers at all, and a client that has heard nothing treats the request
 as stalled and retries it — firing a second generation at an already busy GPU.
 Then ping events go out during any long silence, which is what the real Anthropic
 API does too.
+
+Those pings have a cost: they keep Claude Code waiting even when nothing will
+ever arrive. If Ollama loses the model mid-request — a crashed or out-of-memory
+runner — the stream just goes quiet, and the client would wait out the whole
+read timeout. So a watchdog checks /api/ps during silence and ends the turn with
+an error once the model is gone.
 """
 
 from __future__ import annotations
@@ -23,12 +29,15 @@ from typing import Any, AsyncIterator
 import httpx
 
 from .config import Config
+from .preflight import model_present
 from .translate import STOP_REASONS, ThinkFilter, new_message_id, tool_use_block
 
 log = logging.getLogger("claude_ollama")
 
 # Seconds of silence from Ollama before a keepalive ping goes out.
 PING_INTERVAL = 15.0
+# Seconds of silence between checks that the model is still loaded.
+WATCHDOG_INTERVAL = 15.0
 
 
 def sse(event: str, data: dict) -> str:
@@ -41,6 +50,18 @@ def _ping() -> str:
 
 def _error(message: str) -> str:
     return sse("error", {"type": "error", "error": {"type": "api_error", "message": message}})
+
+
+async def _model_loaded(client: httpx.AsyncClient, model: str) -> bool | None:
+    """Whether Ollama has ``model`` in memory; None if it could not be asked."""
+    try:
+        reply = await client.get("/api/ps", timeout=5.0)
+        reply.raise_for_status()
+        entries = reply.json().get("models") or []
+    except Exception:  # noqa: BLE001 - an unanswerable check decides nothing
+        return None
+    names = [n for m in entries for n in (m.get("name"), m.get("model")) if n]
+    return model_present(model, names)
 
 
 class _RetryWithoutThink(Exception):
@@ -101,7 +122,28 @@ async def _attempt(
         finally:
             await queue.put(("end", None))
 
+    loop = asyncio.get_running_loop()
+    model = str(payload.get("model", ""))
+    last_line = loop.time()
+    # Armed once the model is known to be loaded for this request. Before that
+    # an absent model is just a cold load in progress, which is not a fault.
+    armed = False
+
+    async def watchdog() -> None:
+        nonlocal armed
+        while True:
+            await asyncio.sleep(WATCHDOG_INTERVAL)
+            if loop.time() - last_line < WATCHDOG_INTERVAL:
+                continue
+            loaded = await _model_loaded(client, model)
+            if loaded:
+                armed = True
+            elif loaded is False and armed:
+                await queue.put(("unloaded", None))
+                return
+
     task = asyncio.create_task(pump())
+    guard = asyncio.create_task(watchdog())
 
     next_index = 0
     text_index: int | None = None
@@ -147,6 +189,23 @@ async def _attempt(
 
             if kind == "end":
                 break
+
+            if kind == "unloaded":
+                log.warning(
+                    "%s was unloaded while this request waited on it; ending the turn. "
+                    "Check the Ollama server log for a crashed or out-of-memory runner.",
+                    model,
+                )
+                failure = (
+                    f"Ollama unloaded {model} in the middle of this request, so no more "
+                    "output will arrive. Usually its runner crashed or ran out of memory; "
+                    "the Ollama server log says which. Send the message again to retry."
+                )
+                break
+
+            # Output means the model is loaded, which arms the watchdog.
+            last_line = loop.time()
+            armed = True
 
             line = str(value).strip()
             if not line:
@@ -240,6 +299,7 @@ async def _attempt(
                 break
     finally:
         task.cancel()
+        guard.cancel()
 
     if failure is not None:
         if text_index is not None:

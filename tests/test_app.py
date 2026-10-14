@@ -461,3 +461,107 @@ async def test_streamed_usage_reports_input_tokens():
     delta = [d for n, d in parse_sse(reply.text) if n == "message_delta"][0]
     assert delta["usage"]["input_tokens"] == 18432
     assert delta["usage"]["output_tokens"] == 57
+
+
+def watchdog_upstream(ps_reply, first_chunk: bool):
+    """Ollama that streams one chunk (optionally) and then goes silent for good.
+
+    ``ps_reply`` is what /api/ps answers: a list of loaded model names, or an
+    exception to raise.
+    """
+
+    async def silent_stream():
+        if first_chunk:
+            yield ndjson({"message": {"content": "thinking about it"}, "done": False})
+        await asyncio.sleep(3600)  # the request that never finishes
+        yield b""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/ps":
+            if isinstance(ps_reply, Exception):
+                raise ps_reply
+            return httpx.Response(200, json={"models": [{"name": n, "model": n} for n in ps_reply]})
+        return httpx.Response(200, content=silent_stream())
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://ollama")
+
+
+async def run_until_quiet(upstream, seconds: float) -> list[tuple[str, dict]]:
+    """Collect events for at most ``seconds``; a stream still open is cut off."""
+    chunks: list[str] = []
+
+    async def collect():
+        async for chunk in stream_module.stream_response(upstream, {"model": "x:9b"}, CFG, "x:9b"):
+            chunks.append(chunk)
+
+    try:
+        await asyncio.wait_for(collect(), seconds)
+    except asyncio.TimeoutError:
+        pass
+    await upstream.aclose()
+    return parse_sse("".join(chunks))
+
+
+@pytest.fixture
+def fast_watchdog(monkeypatch):
+    monkeypatch.setattr(stream_module, "PING_INTERVAL", 0.05)
+    monkeypatch.setattr(stream_module, "WATCHDOG_INTERVAL", 0.05)
+
+
+@pytest.mark.asyncio
+async def test_an_unloaded_model_ends_the_turn_instead_of_hanging(fast_watchdog, caplog):
+    """The model streamed, then vanished from /api/ps: nothing more will come.
+
+    Without this, keepalive pings hold Claude Code on a dead request until the
+    read timeout — ten minutes by default.
+    """
+    events = await run_until_quiet(watchdog_upstream([], first_chunk=True), 2.0)
+    names = [name for name, _ in events]
+    assert names[-1] == "error", names
+    assert "unloaded x:9b" in events[-1][1]["error"]["message"]
+    assert "was unloaded" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_cold_load_is_not_mistaken_for_an_unload(fast_watchdog):
+    """Before any output the model may simply not be loaded yet."""
+    events = await run_until_quiet(watchdog_upstream([], first_chunk=False), 0.6)
+    assert "error" not in [name for name, _ in events]
+
+
+@pytest.mark.asyncio
+async def test_a_model_still_loaded_keeps_the_turn_waiting(fast_watchdog):
+    """Long silence alone is fine: a slow generation is still a generation."""
+    events = await run_until_quiet(watchdog_upstream(["x:9b"], first_chunk=True), 0.6)
+    names = [name for name, _ in events]
+    assert "error" not in names
+    assert names.count("ping") >= 3
+
+
+@pytest.mark.asyncio
+async def test_an_unanswerable_check_decides_nothing(fast_watchdog):
+    upstream = watchdog_upstream(httpx.ConnectError("ps unavailable"), first_chunk=True)
+    events = await run_until_quiet(upstream, 0.6)
+    assert "error" not in [name for name, _ in events]
+
+
+@pytest.mark.asyncio
+async def test_a_model_seen_loaded_then_gone_also_counts(fast_watchdog):
+    """Armed by /api/ps alone, for a model that has produced no output yet."""
+    loaded = ["x:9b"]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/ps":
+            reply = httpx.Response(200, json={"models": [{"name": n} for n in loaded]})
+            loaded.clear()  # present on the first check, gone after
+            return reply
+
+        async def silent():
+            await asyncio.sleep(3600)
+            yield b""
+
+        return httpx.Response(200, content=silent())
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://ollama")
+    events = await run_until_quiet(upstream, 2.0)
+    assert events[-1][0] == "error"

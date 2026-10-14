@@ -37,6 +37,7 @@ print(f"MAIN_MODEL={c.default_model}")
 print(f"SMALL_MODEL={c.small_model or c.default_model}")
 print(f"TIMEOUT_MS={int(c.timeout * 1000)}")
 print(f"NUM_CTX={c.num_ctx}")
+print(f"MAX_OUTPUT={c.max_output}")
 print(f"OLLAMA={c.base_url}")
 PY
 )"
@@ -94,6 +95,10 @@ export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$NUM_CTX"
 # The /model picker's Default row otherwise resolves to "<model>[1m]", a 1M
 # window that undoes the line above just as silently.
 export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+# Claude Code compacts at window - min(max output, 20000) - 13000. Its default
+# output cap of 32000 puts that at half of a 64K window; a smaller cap moves it
+# up without letting prompt plus reply outgrow num_ctx.
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$MAX_OUTPUT"
 # Nothing below changes where prompts go — ANTHROPIC_BASE_URL already confines
 # conversation content to Ollama. These close the side channels Claude Code opens
 # to Anthropic regardless of which model serves the session.

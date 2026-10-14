@@ -50,6 +50,7 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8765
     num_ctx: int = 65536
+    max_output: int = 8192
     temperature: float = 0.0
     thinking: str = "off"
     strip_thinking: bool = True
@@ -118,6 +119,7 @@ def load(env_path: str | os.PathLike[str] | None = None) -> Config:
         host=get("CLAUDE_OLLAMA_HOST", Config.host),
         port=int(number("CLAUDE_OLLAMA_PORT", Config.port)),
         num_ctx=int(number("CLAUDE_OLLAMA_NUM_CTX", Config.num_ctx)),
+        max_output=int(number("CLAUDE_OLLAMA_MAX_OUTPUT", Config.max_output)),
         temperature=number("CLAUDE_OLLAMA_TEMPERATURE", Config.temperature),
         thinking=get("CLAUDE_OLLAMA_THINKING", Config.thinking).lower(),
         strip_thinking=flag("CLAUDE_OLLAMA_STRIP_THINKING", Config.strip_thinking),

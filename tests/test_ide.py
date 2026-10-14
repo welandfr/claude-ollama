@@ -21,6 +21,8 @@ def test_env_block_points_at_the_proxy():
     assert values["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(Config.num_ctx)
     # Without it, picking Default in /model moves to a 1M window anyway.
     assert values["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "1"
+    # Claude Code's own 32000 would make it compact at half the window.
+    assert values["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(Config.max_output)
     # A non-empty token is what keeps Claude Code from showing a login screen.
     assert values["ANTHROPIC_AUTH_TOKEN"]
 

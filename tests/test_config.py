@@ -98,6 +98,7 @@ def test_example_file_matches_the_code():
         "CLAUDE_OLLAMA_SMALL_MODEL",
         "CLAUDE_OLLAMA_MODELS",
         "CLAUDE_OLLAMA_NUM_CTX",
+        "CLAUDE_OLLAMA_MAX_OUTPUT",
         "CLAUDE_OLLAMA_TEMPERATURE",
         "CLAUDE_OLLAMA_THINKING",
         "CLAUDE_OLLAMA_STRIP_THINKING",

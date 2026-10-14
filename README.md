@@ -212,6 +212,7 @@ OLLAMA_BASE_URL=http://gpubox.lan:11434 claude-ollama
 | `CLAUDE_OLLAMA_SMALL_MODEL` | unset | Model for its cheap background calls |
 | `CLAUDE_OLLAMA_MODELS` | unset | More models to offer in `/model`, comma or space separated |
 | `CLAUDE_OLLAMA_NUM_CTX` | `65536` | Context window requested from Ollama |
+| `CLAUDE_OLLAMA_MAX_OUTPUT` | `8192` | Longest single reply; sets where Claude Code auto-compacts (see below) |
 | `CLAUDE_OLLAMA_TEMPERATURE` | `0.0` | Used when the request does not specify one |
 | `CLAUDE_OLLAMA_THINKING` | `off` | `off` sends `think=false`, `on` sends `think=true`, `auto` omits the field |
 | `CLAUDE_OLLAMA_STRIP_THINKING` | `true` | Remove `<think>…</think>` that leaks into content |
@@ -333,6 +334,39 @@ trust the arithmetic — `ollama ps` on the Ollama machine prints the allocated
 means the window is too large for the card, and the slowdown is severe rather
 than fatal, so it is easy to miss.
 
+### When auto-compaction fires
+
+Claude Code does not compact near the end of the window. It reserves room for
+the longest reply it might request, capped at 20000 tokens, plus a fixed 13000,
+and compacts once the conversation reaches what is left:
+
+```
+threshold = window - min(max output tokens, 20000) - 13000
+```
+
+Those reserves are sized for 200K windows. Its default output cap is 32000, so on
+a 64K window it compacted at **32,536 tokens — half the window**, with the
+conversation then rebuilt from a summary the local model writes. That summary is
+where earlier context gets lost, so the fewer compactions the better.
+
+`CLAUDE_OLLAMA_MAX_OUTPUT` (default 8192) is exported as
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, which moves the threshold to 44,344 (68%).
+Measured with `claude --debug-file`, which logs the effective window:
+
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `max_tokens` sent | effective window | compacts at |
+| --- | --- | --- | --- |
+| unset (32000) | 32000 | 45,536 | 32,536 |
+| 8192 | 8192 | 57,344 | 44,344 |
+
+The reserve is not waste: Ollama's `num_ctx` has to hold the prompt *and* the
+reply, so the threshold plus `CLAUDE_OLLAMA_MAX_OUTPUT` must stay under it. Going
+lower than 8192 compacts later still, but cuts off any reply longer than that —
+including a file written in a single tool call (8192 tokens is roughly 30KB of
+code). The other lever is `CLAUDE_OLLAMA_NUM_CTX`, if the card has room.
+
+Editor sessions get the same value from `vscode-setup.sh`; re-run it in projects
+set up before this setting existed.
+
 ## What gets translated
 
 | Anthropic | Ollama |
@@ -388,6 +422,31 @@ If you still see that warning, the request is exceeding Claude Code's own ceilin
 rather than looking stalled: raise `CLAUDE_OLLAMA_TIMEOUT`, which also sets
 `API_TIMEOUT_MS`. A smaller `CLAUDE_OLLAMA_NUM_CTX` cuts prompt-evaluation time
 directly, at the cost of how much history fits.
+
+### When the model disappears mid-request
+
+The pings have a downside: they keep Claude Code waiting even when nothing will
+ever arrive. If Ollama loses the model during a request — typically a runner that
+crashed or ran out of memory — the stream goes quiet, the model drops out of
+`ollama ps`, and without a check the session would sit until the read timeout
+(`CLAUDE_OLLAMA_TIMEOUT`, ten minutes).
+
+So during any silence the proxy also asks Ollama's `/api/ps` every 15 seconds
+(`WATCHDOG_INTERVAL`) whether the model is still loaded. If it was loaded earlier
+in this request and no longer is, the turn ends with an error naming the model,
+and `proxy.log` says:
+
+```
+WARNING ornith-1.5:9b was unloaded while this request waited on it; ending the turn.
+```
+
+Send the message again: the next request loads the model afresh. If it keeps
+happening, the Ollama server log has the cause.
+
+It fires only on that sequence. A model that has not loaded *yet* (a cold start)
+is not a fault, a model still loaded but slow is left alone, and a `/api/ps` that
+cannot be reached decides nothing. A runner that hangs while staying loaded is
+not caught; that still ends at the read timeout.
 
 ## Network isolation
 
@@ -598,6 +657,14 @@ resolves to a `[1m]` variant with a 1M window, which only
 `CLAUDE_CODE_DISABLE_1M_CONTEXT` prevents. Either path, left open, lets the
 conversation grow past what Ollama keeps. Found by driving the picker against a
 stub server and reading the status line, not from documentation.
+
+**Compaction reserves are absolute, not proportional, so they halve a small
+window.** Claude Code compacts at `window − min(max output, 20000) − 13000`. On
+a 200K window that is 84%; on a 64K one, with its default 32000-token output cap,
+it is 50% (32,536 tokens, measured from its debug log and matching the
+`prompt=33559` → `20541` drop in `proxy.log`). Each compaction swaps the history
+for a summary written by the local model, so an early threshold costs context as
+well as time. Capping output at 8192 moves it to 68%.
 
 **Hypothesis, not a result:** for agentic coding the binding constraint is
 tool-calling reliability across long multi-turn contexts, not code-generation
