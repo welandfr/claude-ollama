@@ -53,6 +53,7 @@ def create_app(cfg: config_module.Config | None = None) -> FastAPI:
             "ok": upstream["reachable"],
             "ollama": {"base_url": cfg.base_url, **upstream},
             "default_model": cfg.default_model,
+            "models": cfg.picker_models(),
             "num_ctx": cfg.num_ctx,
             # Lets the launcher notice a proxy still running older code.
             "code": source.fingerprint(),
@@ -103,13 +104,14 @@ def create_app(cfg: config_module.Config | None = None) -> FastAPI:
         payload = build_request(body, cfg)
         model = payload["model"]
         requested = (body.get("model") or "").strip()
-        if requested and requested not in {cfg.default_model, cfg.small_model}:
+        if requested and requested not in cfg.allowed_models():
             # Worth saying out loud: it means something on the client side still
             # names a different model — a settings.json env block, or a model
             # choice Claude Code persisted for this project.
             log.warning(
                 "request asked for %r; serving %r from .env instead. Something on "
-                "the Claude Code side still names the old model.",
+                "the Claude Code side still names an old model, or it needs adding "
+                "to CLAUDE_OLLAMA_MODELS.",
                 requested,
                 model,
             )

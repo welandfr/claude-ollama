@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -37,6 +38,8 @@ def env_block(cfg: config_module.Config) -> dict[str, str]:
         # Claude Code assumes 200k for a model it does not recognise; without this
         # it compacts at that and Ollama silently truncates the overflow.
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(cfg.num_ctx),
+        # Or the Default row in /model switches to a "[1m]" variant and a 1M window.
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
         # Side channels to Anthropic, independent of where prompts go.
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "DISABLE_TELEMETRY": "1",
@@ -64,6 +67,57 @@ WantedBy=default.target
 
 def status_line(repo: Path) -> dict[str, str]:
     return {"type": "command", "command": str(repo / "statusline.py")}
+
+
+def model_picker(cfg: config_module.Config) -> dict:
+    """The /model rows: the .env models instead of Claude's own lineup.
+
+    Claude Code honours this only from --settings or user settings, never from a
+    project's .claude/, so the launcher carries it and vscode-setup.sh cannot.
+    """
+    rows = [
+        {
+            "model": name,
+            "label": name,
+            "description": "CLAUDE_OLLAMA_MODEL" if name == cfg.default_model else "CLAUDE_OLLAMA_MODELS",
+        }
+        for name in cfg.picker_models()
+    ]
+    return {"replaceBuiltInOptions": True, "options": rows}
+
+
+def user_settings_path() -> Path:
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
+    return Path(base) / "settings.json"
+
+
+def user_model(path: Path) -> str | None:
+    try:
+        return json.loads(path.read_text() or "{}").get("model")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def restore_user_model(path: Path, before: str | None, cfg: config_module.Config) -> bool:
+    """Undo a /model pick that Claude Code saved as everyone's default.
+
+    Enter in the picker writes the choice to user settings, where a plain
+    `claude` session would then ask Anthropic for an Ollama model; picking the
+    Default row instead deletes whatever model was saved. Only those two are
+    reverted — any other value was set on purpose.
+    """
+    now = user_model(path)
+    # Picking the Default row deletes the key rather than writing a name.
+    ours = now is None or now.removesuffix("[1m]") in cfg.allowed_models()
+    if now == before or not ours or not path.is_file():
+        return False
+    data = json.loads(path.read_text() or "{}")
+    if before is None:
+        data.pop("model", None)
+    else:
+        data["model"] = before
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return True
 
 
 def write_settings(target: Path, values: dict[str, str], shared: bool) -> Path:
@@ -105,6 +159,21 @@ def main(argv: list[str] | None = None) -> int:
         help="print session settings JSON for claude --settings, and exit",
     )
     parser.add_argument(
+        "--no-statusline",
+        action="store_true",
+        help="with --print-settings: leave the status line out",
+    )
+    parser.add_argument(
+        "--get-user-model",
+        action="store_true",
+        help="print the model saved in user settings as JSON (null if none), and exit",
+    )
+    parser.add_argument(
+        "--restore-user-model",
+        metavar="JSON",
+        help="put back a user-settings model recorded by --get-user-model",
+    )
+    parser.add_argument(
         "--print-service",
         action="store_true",
         help="print a systemd user unit for the proxy and exit",
@@ -115,8 +184,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.print_settings:
         # Passed to `claude --settings` by the launcher, so every session gets
-        # the status line without installing anything per project.
-        print(json.dumps({"statusLine": status_line(config_module.ROOT)}))
+        # these without installing anything per project.
+        settings: dict = {"modelPicker": model_picker(cfg)}
+        if not args.no_statusline:
+            settings["statusLine"] = status_line(config_module.ROOT)
+        print(json.dumps(settings))
+        return 0
+
+    if args.get_user_model:
+        print(json.dumps(user_model(user_settings_path())))
+        return 0
+
+    if args.restore_user_model is not None:
+        path = user_settings_path()
+        if restore_user_model(path, json.loads(args.restore_user_model), cfg):
+            print(f"restored the model in {path} (a /model pick had replaced it)")
         return 0
 
     if args.print_service:

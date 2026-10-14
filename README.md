@@ -208,8 +208,9 @@ OLLAMA_BASE_URL=http://gpubox.lan:11434 claude-ollama
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Where Ollama listens |
 | `CLAUDE_OLLAMA_TIMEOUT` | `600` | Request timeout in seconds; also becomes Claude Code's `API_TIMEOUT_MS` |
-| `CLAUDE_OLLAMA_MODEL` | `qwen3.5:9b` | Model for Claude Code's main requests |
+| `CLAUDE_OLLAMA_MODEL` | `ornith-1.5:9b` | Model for Claude Code's main requests |
 | `CLAUDE_OLLAMA_SMALL_MODEL` | unset | Model for its cheap background calls |
+| `CLAUDE_OLLAMA_MODELS` | unset | More models to offer in `/model`, comma or space separated |
 | `CLAUDE_OLLAMA_NUM_CTX` | `65536` | Context window requested from Ollama |
 | `CLAUDE_OLLAMA_TEMPERATURE` | `0.0` | Used when the request does not specify one |
 | `CLAUDE_OLLAMA_THINKING` | `off` | `off` sends `think=false`, `on` sends `think=true`, `auto` omits the field |
@@ -221,9 +222,11 @@ OLLAMA_BASE_URL=http://gpubox.lan:11434 claude-ollama
 `CLAUDE_OLLAMA_ENV` can point the loader at a different file, if you want to keep
 several and switch between them.
 
-**`.env` is the only thing that decides which model runs.** Whatever model id
-Claude Code asks for is ignored, with one exception: an id containing `haiku` — its
-cheap background calls — goes to `CLAUDE_OLLAMA_SMALL_MODEL` if you set one.
+**`.env` is the only thing that decides which model runs.** A model id Claude Code
+asks for is honoured only if `.env` names it — `CLAUDE_OLLAMA_MODEL`,
+`CLAUDE_OLLAMA_SMALL_MODEL` or one listed in `CLAUDE_OLLAMA_MODELS`. Anything else
+gets `CLAUDE_OLLAMA_MODEL`, except an id containing `haiku` (Claude Code's cheap
+background calls), which goes to `CLAUDE_OLLAMA_SMALL_MODEL` if you set one.
 
 That is deliberate. Claude Code can ask for a model named in a `settings.json`
 `env` block or persisted from an earlier session, and an earlier version of this
@@ -233,11 +236,58 @@ The proxy now serves the configured model and logs the discrepancy:
 
 ```
 request asked for 'qwen3:8b'; serving 'qwen3.5:9b' from .env instead. Something on
-the Claude Code side still names the old model.
+the Claude Code side still names an old model, or it needs adding to
+CLAUDE_OLLAMA_MODELS.
 ```
 
-To change model, edit `.env` or set `CLAUDE_OLLAMA_MODEL` for one run — not
-`ANTHROPIC_MODEL`.
+To change the model a session starts on, edit `.env` or set `CLAUDE_OLLAMA_MODEL`
+for one run — not `ANTHROPIC_MODEL`.
+
+### Switching models with `/model`
+
+List the models you want to switch between:
+
+```sh
+CLAUDE_OLLAMA_MODEL=ornith-1.5:9b
+CLAUDE_OLLAMA_MODELS=qwen3.5:9b,qwen3:8b
+```
+
+`/model` then offers exactly those, in place of Claude's own lineup:
+
+```
+1. Default (recommended)   Use the default model (currently ornith-1.5:9b)
+2. ornith-1.5:9b           CLAUDE_OLLAMA_MODEL
+3. qwen3.5:9b              CLAUDE_OLLAMA_MODELS
+4. qwen3:8b                CLAUDE_OLLAMA_MODELS
+```
+
+The launcher passes these rows as `modelPicker` in its `--settings`, and the
+startup check verifies every listed model is pulled. Things to know:
+
+- **Every session starts on `CLAUDE_OLLAMA_MODEL`.** The launcher exports it as
+  `ANTHROPIC_MODEL`, which outranks a saved `/model` choice.
+- **A pick does not leak into plain `claude`.** Enter in the picker saves the
+  choice to `~/.claude/settings.json` ("set as default"), where a normal Claude
+  session would then ask Anthropic for `qwen3.5:9b`; picking Default deletes your
+  saved model instead. The launcher records that value before starting and puts
+  it back on exit, printing `restored the model in …` when it does. Pressing `s`
+  instead of Enter ("this session only") avoids the write altogether. Only a
+  value naming one of the `.env` models, or a deleted one, is restored; it
+  cannot help if the session is killed rather than exited.
+- **All models share `CLAUDE_OLLAMA_NUM_CTX`**, so size it for the largest.
+- **Switching unloads the old model** when the server runs
+  `OLLAMA_MAX_LOADED_MODELS=1` (as `ollama-docker-api` does on 16GB), so the first
+  reply after a switch includes the load time.
+- **Launcher only.** Claude Code ignores `modelPicker` in a project's `.claude/`,
+  so `vscode-setup.sh` cannot carry it. In the editor, `/model` still shows
+  Claude's lineup; Haiku maps to `CLAUDE_OLLAMA_SMALL_MODEL` and the rest to
+  `CLAUDE_OLLAMA_MODEL`.
+- **A running proxy must be restarted** after the list changes, or it serves a
+  newly listed model as the default. The startup check reports this.
+
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is set alongside: without it the Default row
+resolves to `ornith-1.5:9b[1m]` and Claude Code switches to a 1M window, past
+`CLAUDE_OLLAMA_NUM_CTX` — the silent-truncation case described next.
 
 ### Context size
 
@@ -540,6 +590,14 @@ generated locally, the second attempt continues the same logical response.
 Setting `DISABLE_PROMPT_CACHING=1` produces a standing warning that requests
 "will be slower and cost more" — untrue of a local model with no per-token
 billing. Caching is left enabled and `cache_control` simply discarded.
+
+**The client's context window has more than one source, and each must be
+pinned.** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` fixes the window Claude Code assumes
+for an unknown model, but the `/model` picker's Default row independently
+resolves to a `[1m]` variant with a 1M window, which only
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` prevents. Either path, left open, lets the
+conversation grow past what Ollama keeps. Found by driving the picker against a
+stub server and reading the status line, not from documentation.
 
 **Hypothesis, not a result:** for agentic coding the binding constraint is
 tool-calling reliability across long multi-turn contexts, not code-generation

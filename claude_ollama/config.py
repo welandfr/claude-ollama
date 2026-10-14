@@ -10,7 +10,7 @@ usual setup in .env and still override one value for a single run:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,19 +55,30 @@ class Config:
     strip_thinking: bool = True
     default_model: str = "ornith-1.5:9b"
     small_model: str = ""
+    # Extra models offered in Claude Code's /model picker, beside default_model.
+    models: list[str] = field(default_factory=list)
     debug: bool = False
+
+    def picker_models(self) -> list[str]:
+        """The /model rows, default first, without duplicates."""
+        return list(dict.fromkeys([self.default_model, *self.models]))
+
+    def allowed_models(self) -> set[str]:
+        return {*self.picker_models(), *([self.small_model] if self.small_model else [])}
 
     def resolve_model(self, requested: str | None) -> str:
         """Which Ollama model to run for a requested model id.
 
-        The requested name is deliberately NOT honoured, beyond routing the cheap
-        background calls to the small model. Claude Code can ask for a model from
-        a stale settings file or a model choice persisted from an earlier session,
-        and an earlier version passed such a name through verbatim — so a leftover
-        `qwen3:8b` silently ran qwen3:8b even though .env said otherwise. .env is
-        the only thing that decides.
+        A requested name is honoured only if .env lists it. Claude Code can ask
+        for a model from a stale settings file or a model choice persisted from
+        an earlier session, and an earlier version passed any name through
+        verbatim — so a leftover `qwen3:8b` silently ran qwen3:8b even though
+        .env said otherwise. Anything not listed gets the default.
         """
-        low = (requested or "").strip().lower()
+        name = (requested or "").strip()
+        if name in self.allowed_models():
+            return name
+        low = name.lower()
         if self.small_model and ("haiku" in low or "small" in low):
             return self.small_model
         return self.default_model
@@ -112,6 +123,7 @@ def load(env_path: str | os.PathLike[str] | None = None) -> Config:
         strip_thinking=flag("CLAUDE_OLLAMA_STRIP_THINKING", Config.strip_thinking),
         default_model=get("CLAUDE_OLLAMA_MODEL", Config.default_model),
         small_model=get("CLAUDE_OLLAMA_SMALL_MODEL", ""),
+        models=get("CLAUDE_OLLAMA_MODELS", "").replace(",", " ").split(),
         debug=flag("CLAUDE_OLLAMA_DEBUG", Config.debug),
     )
     if cfg.thinking not in {"off", "on", "auto"}:

@@ -96,6 +96,7 @@ def test_example_file_matches_the_code():
         "CLAUDE_OLLAMA_TIMEOUT",
         "CLAUDE_OLLAMA_MODEL",
         "CLAUDE_OLLAMA_SMALL_MODEL",
+        "CLAUDE_OLLAMA_MODELS",
         "CLAUDE_OLLAMA_NUM_CTX",
         "CLAUDE_OLLAMA_TEMPERATURE",
         "CLAUDE_OLLAMA_THINKING",
@@ -108,7 +109,7 @@ def test_example_file_matches_the_code():
 
 
 def test_only_env_decides_which_model_runs():
-    """A requested name must never override .env.
+    """A requested name not listed in .env must never override it.
 
     Claude Code can ask for a model named in a stale settings file or persisted
     from an earlier session; honouring that ran the wrong model silently.
@@ -126,3 +127,18 @@ def test_only_env_decides_which_model_runs():
 def test_haiku_falls_back_to_the_main_model_when_no_small_one_is_set():
     cfg = Config(default_model="qwen3.5:9b", small_model="")
     assert cfg.resolve_model("claude-haiku-4-5-20251001") == "qwen3.5:9b"
+
+
+def test_models_listed_in_env_are_honoured_by_name(tmp_path):
+    """/model sends the picked name verbatim; listed names must get through."""
+    cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_MODEL=a:9b\nCLAUDE_OLLAMA_MODELS=b:8b, c:4b a:9b\n"))
+    assert cfg.picker_models() == ["a:9b", "b:8b", "c:4b"]
+    assert cfg.resolve_model("b:8b") == "b:8b"
+    assert cfg.resolve_model("c:4b") == "c:4b"
+    # Still not a passthrough: unlisted names get the default.
+    assert cfg.resolve_model("qwen3:8b") == "a:9b"
+
+
+def test_no_extra_models_means_just_the_default(tmp_path):
+    cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_MODEL=a:9b\n"))
+    assert cfg.picker_models() == ["a:9b"]

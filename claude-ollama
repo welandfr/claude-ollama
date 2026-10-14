@@ -91,6 +91,9 @@ export API_TIMEOUT_MS="$TIMEOUT_MS"
 # and compacts at that — which would send prompts far past num_ctx for Ollama to
 # truncate in silence. Keep the two windows equal.
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$NUM_CTX"
+# The /model picker's Default row otherwise resolves to "<model>[1m]", a 1M
+# window that undoes the line above just as silently.
+export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 # Nothing below changes where prompts go — ANTHROPIC_BASE_URL already confines
 # conversation content to Ollama. These close the side channels Claude Code opens
 # to Anthropic regardless of which model serves the session.
@@ -105,16 +108,24 @@ export DISABLE_AUTOUPDATER=1
 # DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
 # apply to a local model.
 
-# Carry the status line as session settings rather than installing it into every
-# project. Flag settings outrank project ones, so this wins wherever you launch.
+# Carry the status line and the /model picker rows as session settings rather
+# than installing them into every project. Flag settings outrank project ones,
+# so this wins wherever you launch. The picker can only come from here: Claude
+# Code ignores modelPicker in a project's .claude/.
 # CLAUDE_OLLAMA_NO_STATUSLINE=1 keeps whatever status line you already have.
-SESSION_SETTINGS=""
-if [ "${CLAUDE_OLLAMA_NO_STATUSLINE:-0}" != "1" ]; then
-  SESSION_SETTINGS=$("$REPO/.venv/bin/python" -m claude_ollama.ide --print-settings 2>/dev/null || true)
-fi
+SETTINGS_ARGS=(--print-settings)
+[ "${CLAUDE_OLLAMA_NO_STATUSLINE:-0}" = "1" ] && SETTINGS_ARGS+=(--no-statusline)
+SESSION_SETTINGS=$("$REPO/.venv/bin/python" -m claude_ollama.ide "${SETTINGS_ARGS[@]}" 2>/dev/null || true)
 
+# Enter in /model saves the pick to ~/.claude/settings.json, where a plain
+# `claude` would then ask Anthropic for an Ollama model. Put it back on exit.
+USER_MODEL=$("$REPO/.venv/bin/python" -m claude_ollama.ide --get-user-model 2>/dev/null || echo null)
+
+STATUS=0
 if [ -n "$SESSION_SETTINGS" ]; then
-  claude --settings "$SESSION_SETTINGS" "$@"
+  claude --settings "$SESSION_SETTINGS" "$@" || STATUS=$?
 else
-  claude "$@"
+  claude "$@" || STATUS=$?
 fi
+"$REPO/.venv/bin/python" -m claude_ollama.ide --restore-user-model "$USER_MODEL" || true
+exit "$STATUS"

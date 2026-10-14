@@ -58,6 +58,14 @@ def test_a_proxy_predating_the_check_counts_as_stale():
     assert "before this check existed" in drift[0]
 
 
+def test_mismatch_detects_a_changed_model_list():
+    """An old list would answer a fresh /model pick with the default."""
+    health = {"default_model": "qwen3.5:9b", "models": ["qwen3.5:9b"], "num_ctx": 65536, "code": "same"}
+    cfg = Config(default_model="qwen3.5:9b", models=["qwen3:8b"], num_ctx=65536)
+    drift = proxy_mismatch(health, cfg, code="same")
+    assert len(drift) == 1 and "qwen3:8b" in drift[0]
+
+
 def test_no_mismatch_when_the_proxy_agrees():
     health = {"default_model": "qwen3.5:9b", "num_ctx": 65536, "code": "same"}
     assert proxy_mismatch(health, CFG, code="same") == []

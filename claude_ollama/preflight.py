@@ -55,6 +55,10 @@ def proxy_mismatch(health: dict, cfg: config_module.Config, code: str | None = N
     running_model = health.get("default_model")
     if running_model and running_model != cfg.default_model:
         out.append(f"model {running_model!r}, .env now says {cfg.default_model!r}")
+    running_models = health.get("models")
+    if running_models is not None and running_models != cfg.picker_models():
+        # It would answer a /model pick it does not know with the default.
+        out.append(f"models {running_models}, .env now says {cfg.picker_models()}")
     running_ctx = health.get("num_ctx")
     if running_ctx and int(running_ctx) != cfg.num_ctx:
         out.append(f"num_ctx {running_ctx}, .env now says {cfg.num_ctx}")
@@ -128,7 +132,7 @@ def check(cfg: config_module.Config) -> list[str]:
         return problems
 
     available = [m.get("name", "") for m in tags.get("models", [])]
-    wanted = [cfg.default_model] + ([cfg.small_model] if cfg.small_model else [])
+    wanted = cfg.picker_models() + ([cfg.small_model] if cfg.small_model else [])
     for model in dict.fromkeys(wanted):  # de-duplicated, order kept
         if not model_present(model, available):
             listed = ", ".join(available) or "none"
