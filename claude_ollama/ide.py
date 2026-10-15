@@ -47,6 +47,8 @@ def env_block(cfg: config_module.Config) -> dict[str, str]:
         "DISABLE_TELEMETRY": "1",
         "DISABLE_ERROR_REPORTING": "1",
         "DISABLE_AUTOUPDATER": "1",
+        # claude.ai connectors run through Anthropic; off, and without the warning.
+        "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
     }
 
 

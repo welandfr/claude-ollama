@@ -109,6 +109,10 @@ export DISABLE_ERROR_REPORTING=1
 # The trade-off is that sessions launched this way never self-update; a plain
 # `claude` elsewhere still does.
 export DISABLE_AUTOUPDATER=1
+# claude.ai connectors run through Anthropic, not Ollama, so they stay off. Saying
+# so explicitly also silences the "connectors are disabled because ... another
+# auth source is set" warning shown on machines logged in to claude.ai.
+export ENABLE_CLAUDEAI_MCP_SERVERS=false
 # Prompt caching is deliberately left alone: the proxy ignores cache_control, and
 # DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
 # apply to a local model.

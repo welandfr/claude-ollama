@@ -467,6 +467,14 @@ the launcher and `vscode-setup.sh` set:
 | `DISABLE_TELEMETRY=1` | usage telemetry |
 | `DISABLE_ERROR_REPORTING=1` | crash and error reports |
 | `DISABLE_AUTOUPDATER=1` | update checks against Anthropic's download service |
+| `ENABLE_CLAUDEAI_MCP_SERVERS=false` | claude.ai connectors, which run through Anthropic |
+
+The last one changes no behaviour on its own: with a non-Anthropic auth token,
+Claude Code already skips your claude.ai connectors. But on a machine logged in
+to claude.ai it then warns, every session, that "claude.ai connectors are
+disabled because ANTHROPIC_API_KEY or another auth source is set". Opting out
+explicitly takes the quiet path — its debug log reads `Disabled via env var`
+instead of `Disabled: API-key auth precedence active`.
 
 Ollama's own Claude Code documentation does not mention any of these, so
 `ollama launch claude` leaves them at their defaults — conversation content is
