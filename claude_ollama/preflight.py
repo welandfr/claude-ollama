@@ -1,10 +1,10 @@
 """Startup checks for the launcher.
 
-Three things fail quietly enough to waste real time: Ollama not running, the
-configured model not pulled, and a proxy still serving an older .env because it
-was started before the file changed. The last one is the nastiest — the session
-works, it just uses the wrong model — so all three are treated as errors with the
-exact command to fix them.
+These fail quietly enough to waste real time: Ollama not reachable, a configured
+model not pulled, project settings left over from an older .env, and an Ollama
+context window smaller than the one Claude Code is told about. The last two are
+the nastiest — the session works, it just runs the wrong model or loses the
+start of the conversation — so all are treated as errors with the exact fix.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import config as config_module
-from . import source
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
@@ -42,26 +41,26 @@ def model_present(model: str, available: list[str]) -> bool:
     return False
 
 
-def proxy_mismatch(health: dict, cfg: config_module.Config, code: str | None = None) -> list[str]:
-    """Differences between a running proxy and this checkout."""
+def context_shortfall(ps: dict, cfg: config_module.Config) -> list[str]:
+    """Loaded models whose window is smaller than the one Claude Code assumes.
+
+    Ollama's /v1/messages takes its window from the server (OLLAMA_CONTEXT_LENGTH);
+    nothing on the client side can raise it. Claude Code compacts against
+    CLAUDE_OLLAMA_NUM_CTX, so a smaller server window lets the conversation grow
+    past what Ollama keeps, and Ollama drops the overflow without saying so.
+    Only a loaded model reports its window, so an idle server cannot be checked.
+    """
     out = []
-    expected = code or source.fingerprint()
-    running = health.get("code")
-    if running != expected:
-        # A proxy old enough to predate this field reports nothing, which is
-        # itself proof it is out of date.
-        was = f"code {running}" if running else "code from before this check existed"
-        out.append(f"{was}, checkout is {expected}")
-    running_model = health.get("default_model")
-    if running_model and running_model != cfg.default_model:
-        out.append(f"model {running_model!r}, .env now says {cfg.default_model!r}")
-    running_models = health.get("models")
-    if running_models is not None and running_models != cfg.picker_models():
-        # It would answer a /model pick it does not know with the default.
-        out.append(f"models {running_models}, .env now says {cfg.picker_models()}")
-    running_ctx = health.get("num_ctx")
-    if running_ctx and int(running_ctx) != cfg.num_ctx:
-        out.append(f"num_ctx {running_ctx}, .env now says {cfg.num_ctx}")
+    for entry in ps.get("models") or []:
+        window = entry.get("context_length")
+        if isinstance(window, int) and 0 < window < cfg.num_ctx:
+            out.append(
+                f"Ollama has {entry.get('name', '?')} loaded with a {window}-token context, "
+                f"but CLAUDE_OLLAMA_NUM_CTX is {cfg.num_ctx}.\n"
+                f"  Claude Code would let the conversation outgrow it. Set\n"
+                f"  OLLAMA_CONTEXT_LENGTH={cfg.num_ctx} on the Ollama server, or lower\n"
+                f"  CLAUDE_OLLAMA_NUM_CTX in .env to {window}."
+            )
     return out
 
 
@@ -141,26 +140,16 @@ def check(cfg: config_module.Config) -> list[str]:
                 f"  {pull_command(cfg.base_url, model)}"
             )
 
-    # Only meaningful if something is already listening; a fresh start cannot drift.
     try:
-        health = _get(f"http://{cfg.host}:{cfg.port}/health", 2.0)
+        problems.extend(context_shortfall(_get(f"{cfg.base_url}/api/ps", 5.0), cfg))
     except (urllib.error.URLError, OSError, ValueError):
-        return problems
-
-    drift = proxy_mismatch(health, cfg)
-    if drift:
-        problems.append(
-            f"The proxy already running on {cfg.host}:{cfg.port} does not match this "
-            "checkout:\n"
-            + "".join(f"    - {d}\n" for d in drift)
-            + "  It is reused rather than restarted, so this session would run the\n"
-            "  old code and settings. Restart it:\n"
-            "    systemctl --user restart claude-ollama   (or pkill -f claude_ollama)"
-        )
+        pass  # reachability was established above; an unanswered /api/ps decides nothing
     return problems
 
 
 def main(argv: list[str] | None = None) -> int:
+    for key, why in config_module.obsolete_keys().items():
+        print(f"claude-ollama: {key} in .env is no longer used ({why}); remove it", file=sys.stderr)
     cfg = config_module.load()
     problems = check(cfg)
     if not problems:

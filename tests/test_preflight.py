@@ -3,9 +3,9 @@
 import pytest
 
 from claude_ollama.config import Config
-from claude_ollama.preflight import model_present, proxy_mismatch, pull_command
+from claude_ollama.preflight import context_shortfall, model_present, pull_command
 
-CFG = Config(default_model="qwen3.5:9b", num_ctx=65536, host="127.0.0.1", port=8765)
+CFG = Config(default_model="qwen3.5:9b", num_ctx=65536)
 
 
 @pytest.mark.parametrize(
@@ -38,44 +38,27 @@ def test_model_present(model, available, expected):
     assert model_present(model, available) is expected
 
 
-def test_mismatch_detects_stale_config():
-    health = {"default_model": "qwen3:8b", "num_ctx": 32768, "code": "abc"}
-    drift = proxy_mismatch(health, CFG, code="abc")
-    assert any("qwen3:8b" in d and "qwen3.5:9b" in d for d in drift)
-    assert any("32768" in d and "65536" in d for d in drift)
+# --- server window ---------------------------------------------------------
+# Ollama's /v1/messages takes its window from the server, so a server set lower
+# than CLAUDE_OLLAMA_NUM_CTX truncates in silence. /api/ps reports it per model.
 
 
-def test_mismatch_detects_stale_code_even_when_config_agrees():
-    """A long-running systemd proxy keeps serving whatever it started with."""
-    health = {"default_model": "qwen3.5:9b", "num_ctx": 65536, "code": "oldhash"}
-    drift = proxy_mismatch(health, CFG, code="newhash")
-    assert drift == ["code oldhash, checkout is newhash"]
+def test_a_smaller_server_window_is_caught():
+    ps = {"models": [{"name": "qwen3.5:9b", "context_length": 4096}]}
+    problems = context_shortfall(ps, CFG)
+    assert len(problems) == 1
+    assert "4096" in problems[0] and "OLLAMA_CONTEXT_LENGTH=65536" in problems[0]
 
 
-def test_a_proxy_predating_the_check_counts_as_stale():
-    health = {"default_model": "qwen3.5:9b", "num_ctx": 65536}
-    drift = proxy_mismatch(health, CFG, code="newhash")
-    assert "before this check existed" in drift[0]
+def test_an_equal_or_larger_server_window_is_fine():
+    ps = {"models": [{"name": "a", "context_length": 65536}, {"name": "b", "context_length": 131072}]}
+    assert context_shortfall(ps, CFG) == []
 
 
-def test_mismatch_detects_a_changed_model_list():
-    """An old list would answer a fresh /model pick with the default."""
-    health = {"default_model": "qwen3.5:9b", "models": ["qwen3.5:9b"], "num_ctx": 65536, "code": "same"}
-    cfg = Config(default_model="qwen3.5:9b", models=["qwen3:8b"], num_ctx=65536)
-    drift = proxy_mismatch(health, cfg, code="same")
-    assert len(drift) == 1 and "qwen3:8b" in drift[0]
-
-
-def test_no_mismatch_when_the_proxy_agrees():
-    health = {"default_model": "qwen3.5:9b", "num_ctx": 65536, "code": "same"}
-    assert proxy_mismatch(health, CFG, code="same") == []
-
-
-def test_fingerprint_is_stable_and_short():
-    from claude_ollama.source import fingerprint
-
-    assert fingerprint() == fingerprint()
-    assert len(fingerprint()) == 12
+def test_nothing_loaded_or_no_field_decides_nothing():
+    assert context_shortfall({"models": []}, CFG) == []
+    assert context_shortfall({}, CFG) == []
+    assert context_shortfall({"models": [{"name": "old-ollama"}]}, CFG) == []
 
 
 # --- stale project settings -------------------------------------------------
@@ -90,6 +73,7 @@ from claude_ollama.preflight import settings_drift
 
 STALE = {
     "env": {
+        # Written when Claude Code went through the proxy.
         "ANTHROPIC_BASE_URL": "http://127.0.0.1:8765",
         "ANTHROPIC_AUTH_TOKEN": "ollama",
         "ANTHROPIC_MODEL": "qwen3:8b",
@@ -99,7 +83,7 @@ STALE = {
     }
 }
 
-DRIFT_CFG = Config(default_model="qwen3.5:9b", num_ctx=65536, host="127.0.0.1", port=8765)
+DRIFT_CFG = Config(base_url="http://hem:11434", default_model="qwen3.5:9b", num_ctx=65536)
 
 
 def write(tmp_path, name, data):
@@ -114,6 +98,13 @@ def test_stale_model_in_project_settings_is_caught(tmp_path):
     assert len(problems) == 1
     assert "ANTHROPIC_MODEL is 'qwen3:8b', .env says 'qwen3.5:9b'" in problems[0]
     assert "vscode-setup.sh" in problems[0]  # names the fix
+
+
+def test_settings_still_pointing_at_the_proxy_are_caught(tmp_path):
+    """A project set up in the proxy era would send Claude Code to a dead port."""
+    write(tmp_path, "settings.local.json", STALE)
+    problems = settings_drift(DRIFT_CFG, tmp_path)
+    assert "ANTHROPIC_BASE_URL is 'http://127.0.0.1:8765', .env says 'http://hem:11434'" in problems[0]
 
 
 def test_missing_context_limit_is_caught(tmp_path):

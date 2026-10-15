@@ -5,14 +5,14 @@ import json
 import pytest
 
 from claude_ollama.config import Config
-from claude_ollama.ide import env_block, main, model_picker, restore_user_model, service_unit, write_settings
+from claude_ollama.ide import env_block, main, model_picker, restore_user_model, write_settings
 
-CFG = Config(host="127.0.0.1", port=9999, default_model="qwen3:8b", small_model="qwen3:1.7b", timeout=300.0)
+CFG = Config(base_url="http://gpubox:11434", default_model="qwen3:8b", small_model="qwen3:1.7b", timeout=300.0)
 
 
-def test_env_block_points_at_the_proxy():
+def test_env_block_points_straight_at_ollama():
     values = env_block(CFG)
-    assert values["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
+    assert values["ANTHROPIC_BASE_URL"] == "http://gpubox:11434"
     assert values["ANTHROPIC_MODEL"] == "qwen3:8b"
     assert values["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3:1.7b"
     assert values["API_TIMEOUT_MS"] == "300000"
@@ -37,7 +37,7 @@ def test_small_model_falls_back_to_the_main_one():
 def test_writes_local_settings_by_default(tmp_path):
     path = write_settings(tmp_path, env_block(CFG), shared=False)
     assert path == tmp_path / ".claude" / "settings.local.json"
-    assert json.loads(path.read_text())["env"]["ANTHROPIC_BASE_URL"].endswith(":9999")
+    assert json.loads(path.read_text())["env"]["ANTHROPIC_BASE_URL"] == "http://gpubox:11434"
 
 
 def test_shared_flag_writes_the_committed_file(tmp_path):
@@ -71,12 +71,6 @@ def test_malformed_settings_are_refused_rather_than_overwritten(tmp_path):
 def test_main_rejects_a_missing_directory(tmp_path):
     with pytest.raises(SystemExit, match="not a directory"):
         main([str(tmp_path / "nope")])
-
-
-def test_service_unit_uses_absolute_paths(tmp_path):
-    unit = service_unit(CFG, tmp_path)
-    assert f"ExecStart={tmp_path}/.venv/bin/python -m claude_ollama" in unit
-    assert f"Environment=PYTHONPATH={tmp_path}" in unit
 
 
 def test_status_line_is_added_when_absent(tmp_path):

@@ -1,41 +1,23 @@
 #!/usr/bin/env bash
-# Installs the proxy into a local virtualenv and checks the surrounding pieces.
+# Creates .env, puts claude-ollama on PATH and checks the surrounding pieces.
+# Nothing is installed: the launcher needs only bash, curl and python3's
+# standard library.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
 python3 - <<'PY'
 import sys
-if sys.version_info < (3, 11):
-    sys.exit(f"Python 3.11+ required (tomllib); found {sys.version.split()[0]}")
+if sys.version_info < (3, 9):
+    sys.exit(f"Python 3.9+ required; found {sys.version.split()[0]}")
 PY
-
-# A venv carries absolute paths, so one built elsewhere (another checkout path,
-# a container) is dead on arrival. Testing that bin/python merely runs is not
-# enough: it symlinks to a system interpreter that works fine while sys.prefix
-# still points elsewhere. Checking that pip imports and the prefix is ours
-# catches both a relocated venv and a half-copied one.
-if [ -e .venv ] && ! ./.venv/bin/python -c \
-     "import sys, pip; sys.exit(0 if sys.prefix == '$PWD/.venv' else 1)" >/dev/null 2>&1; then
-  echo "existing .venv is unusable here; rebuilding"
-  rm -rf .venv
-fi
-
-if [ ! -x .venv/bin/python ]; then
-  echo "creating .venv"
-  python3 -m venv .venv
-fi
 
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "created .env from .env.example -- edit it to match your Ollama"
 fi
 
-echo "installing dependencies"
-./.venv/bin/python -m pip install --quiet --upgrade pip
-./.venv/bin/python -m pip install --quiet -r requirements.txt
-
-chmod +x run.sh claude-ollama vscode-setup.sh
+chmod +x claude-ollama vscode-setup.sh statusline.py
 
 # Put claude-ollama on PATH so it can be used from any project directory. The
 # symlink points back here, and the launcher resolves it to find this checkout.
@@ -63,12 +45,12 @@ else
   echo "           curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
-base_url=$(./.venv/bin/python -c 'from claude_ollama import config; print(config.load().base_url)')
+base_url=$(python3 -c 'from claude_ollama import config; print(config.load().base_url)')
 if curl -fsS -m 5 "$base_url/api/tags" >/dev/null 2>&1; then
   echo "ollama:  reachable at $base_url"
-  ./.venv/bin/python - <<PY
-import json, urllib.request
-with urllib.request.urlopen("$base_url/api/tags", timeout=5) as r:
+  python3 - "$base_url" <<'PY'
+import json, sys, urllib.request
+with urllib.request.urlopen(f"{sys.argv[1]}/api/tags", timeout=5) as r:
     for m in json.load(r).get("models", []):
         print("           -", m["name"])
 PY
@@ -76,35 +58,16 @@ else
   echo "ollama:  NOT reachable at $base_url -- fix OLLAMA_BASE_URL in .env"
 fi
 
-# setup.sh deliberately does not restart anything — it cannot know whether the
-# proxy is a systemd unit, a ./run.sh terminal or a launcher-started background
-# job. But a proxy left running on older code is the thing you would hit next,
-# so say so.
-./.venv/bin/python - <<'PY' || true
-import json
-import urllib.error
-import urllib.request
-
-from claude_ollama import config, preflight
-
-cfg = config.load()
-url = f"http://{cfg.host}:{cfg.port}/health"
-try:
-    with urllib.request.urlopen(url, timeout=2) as reply:
-        health = json.load(reply)
-except (urllib.error.URLError, OSError, ValueError):
-    print(f"proxy:   not running at {cfg.host}:{cfg.port} -- claude-ollama starts one on demand")
-else:
-    drift = preflight.proxy_mismatch(health, cfg)
-    if drift:
-        print(f"proxy:   running at {cfg.host}:{cfg.port} but NOT matching this checkout:")
-        for item in drift:
-            print(f"           - {item}")
-        print("         restart it:")
-        print("           systemctl --user restart claude-ollama   (or pkill -f claude_ollama)")
-    else:
-        print(f"proxy:   running at {cfg.host}:{cfg.port}, matches this checkout")
+python3 - <<'PY'
+from claude_ollama import config
+for key, why in config.obsolete_keys().items():
+    print(f".env:    {key} is no longer used ({why}); remove it")
 PY
+
+# Left over from when this project ran a proxy; nothing uses it now.
+if [ -d .venv ]; then
+  echo "venv:    .venv is no longer needed; remove it with: rm -rf $PWD/.venv"
+fi
 
 case ":$PATH:" in
   *":$LINK_DIR:"*) echo "path:    $LINK_DIR is on your PATH" ;;

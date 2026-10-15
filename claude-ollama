@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Starts the proxy if it is not already running, then launches Claude Code
-# pointed at it. Any arguments are passed through to claude.
+# Launches Claude Code against Ollama, which serves the Anthropic Messages API
+# itself at /v1/messages. Any arguments are passed through to claude.
 #
 # Safe to symlink onto your PATH and run from any project: this resolves its own
 # location to find the checkout and deliberately does NOT change directory, so
@@ -10,11 +10,6 @@ set -euo pipefail
 # python3 is a hard requirement anyway, and realpath/readlink -f are not portable.
 SELF="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
 REPO="$(dirname "$SELF")"
-
-if [ ! -x "$REPO/.venv/bin/python" ]; then
-  echo "run $REPO/setup.sh first" >&2
-  exit 1
-fi
 
 # The package is imported from the checkout rather than installed, so it needs
 # to be on sys.path explicitly now that the working directory is the caller's.
@@ -26,59 +21,38 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 1
 fi
 
-# Ask the proxy's own config loader for these, so the launcher cannot drift from
-# it on precedence or defaults.
-eval "$("$REPO/.venv/bin/python" - <<'PY'
+# Ask the shared config loader for these, so the launcher, vscode-setup.sh and
+# the startup checks cannot drift apart on precedence or defaults. shlex.quote
+# because eval runs whatever comes back.
+eval "$(python3 - <<'PY'
+import shlex
 from claude_ollama import config
 c = config.load()
-print(f"PROXY_HOST={c.host}")
-print(f"PROXY_PORT={c.port}")
-print(f"MAIN_MODEL={c.default_model}")
-print(f"SMALL_MODEL={c.small_model or c.default_model}")
-print(f"TIMEOUT_MS={int(c.timeout * 1000)}")
-print(f"NUM_CTX={c.num_ctx}")
-print(f"MAX_OUTPUT={c.max_output}")
-print(f"OLLAMA={c.base_url}")
+values = {
+    "MAIN_MODEL": c.default_model,
+    "SMALL_MODEL": c.small_model or c.default_model,
+    "TIMEOUT_MS": int(c.timeout * 1000),
+    "NUM_CTX": c.num_ctx,
+    "MAX_OUTPUT": c.max_output,
+    "OLLAMA": c.base_url,
+}
+for key, value in values.items():
+    print(f"{key}={shlex.quote(str(value))}")
 PY
 )"
 
-BASE_URL="http://${PROXY_HOST}:${PROXY_PORT}"
-PROXY_PID=""
+# Say where this session is going before Claude Code's interface takes over.
+echo "model $MAIN_MODEL · ollama $OLLAMA · window $NUM_CTX"
 
-# Say it out loud: the model actually used comes from .env, not from whatever
-# Claude Code's UI reports, and that difference has caused real confusion.
-echo "model $MAIN_MODEL · ollama $OLLAMA · num_ctx $NUM_CTX"
-
-# Catch the quiet failures — Ollama down, model not pulled, a proxy still running
-# with an older .env — before handing over to Claude Code.
+# Catch the quiet failures — Ollama down, a model not pulled, stale project
+# settings, a server window smaller than NUM_CTX — before handing over.
 if [ "${CLAUDE_OLLAMA_SKIP_CHECKS:-0}" != "1" ]; then
-  "$REPO/.venv/bin/python" -m claude_ollama.preflight || exit 1
+  python3 -m claude_ollama.preflight || exit 1
 fi
 
-if curl -fsS -m 2 "$BASE_URL/health" >/dev/null 2>&1; then
-  echo "using the proxy already running at $BASE_URL"
-else
-  # Redirect to a file: a background job inherits this terminal, and the proxy's
-  # per-request log would otherwise be drawn straight over Claude Code's TUI.
-  LOG="${CLAUDE_OLLAMA_LOG:-$REPO/proxy.log}"
-  echo "starting proxy on $BASE_URL (log: $LOG)"
-  "$REPO/.venv/bin/python" -m claude_ollama >>"$LOG" 2>&1 &
-  PROXY_PID=$!
-  trap '[ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true' EXIT
-
-  for _ in $(seq 40); do
-    curl -fsS -m 2 "$BASE_URL/health" >/dev/null 2>&1 && break
-    kill -0 "$PROXY_PID" 2>/dev/null || {
-      echo "proxy exited during startup; last lines of $LOG:" >&2
-      tail -n 15 "$LOG" >&2
-      exit 1
-    }
-    sleep 0.25
-  done
-fi
-
-# A non-empty token keeps Claude Code from trying to log in; the proxy ignores it.
-export ANTHROPIC_BASE_URL="$BASE_URL"
+# Straight to Ollama, which speaks the Anthropic Messages API at /v1/messages. A
+# non-empty token keeps Claude Code from trying to log in; Ollama ignores it.
+export ANTHROPIC_BASE_URL="$OLLAMA"
 export ANTHROPIC_AUTH_TOKEN="ollama"
 # Cleared so a real key already in the environment cannot take precedence.
 export ANTHROPIC_API_KEY=""
@@ -89,15 +63,16 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="$MAIN_MODEL"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
 export API_TIMEOUT_MS="$TIMEOUT_MS"
 # Claude Code cannot look up the window of a model it does not know, assumes 200k
-# and compacts at that — which would send prompts far past num_ctx for Ollama to
-# truncate in silence. Keep the two windows equal.
+# and compacts at that — which would send prompts far past Ollama's window, to be
+# truncated in silence. Ollama's window is set on the server
+# (OLLAMA_CONTEXT_LENGTH); the startup checks compare the two when they can.
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$NUM_CTX"
 # The /model picker's Default row otherwise resolves to "<model>[1m]", a 1M
 # window that undoes the line above just as silently.
 export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 # Claude Code compacts at window - min(max output, 20000) - 13000. Its default
 # output cap of 32000 puts that at half of a 64K window; a smaller cap moves it
-# up without letting prompt plus reply outgrow num_ctx.
+# up without letting prompt plus reply outgrow the window.
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$MAX_OUTPUT"
 # Nothing below changes where prompts go — ANTHROPIC_BASE_URL already confines
 # conversation content to Ollama. These close the side channels Claude Code opens
@@ -113,9 +88,8 @@ export DISABLE_AUTOUPDATER=1
 # so explicitly also silences the "connectors are disabled because ... another
 # auth source is set" warning shown on machines logged in to claude.ai.
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
-# Prompt caching is deliberately left alone: the proxy ignores cache_control, and
-# DISABLE_PROMPT_CACHING only earns a warning about cost and speed that does not
-# apply to a local model.
+# Prompt caching is deliberately left alone: DISABLE_PROMPT_CACHING only earns a
+# warning about cost and speed that does not apply to a local model.
 
 # Carry the status line and the /model picker rows as session settings rather
 # than installing them into every project. Flag settings outrank project ones,
@@ -124,11 +98,11 @@ export ENABLE_CLAUDEAI_MCP_SERVERS=false
 # CLAUDE_OLLAMA_NO_STATUSLINE=1 keeps whatever status line you already have.
 SETTINGS_ARGS=(--print-settings)
 [ "${CLAUDE_OLLAMA_NO_STATUSLINE:-0}" = "1" ] && SETTINGS_ARGS+=(--no-statusline)
-SESSION_SETTINGS=$("$REPO/.venv/bin/python" -m claude_ollama.ide "${SETTINGS_ARGS[@]}" 2>/dev/null || true)
+SESSION_SETTINGS=$(python3 -m claude_ollama.ide "${SETTINGS_ARGS[@]}" 2>/dev/null || true)
 
 # Enter in /model saves the pick to ~/.claude/settings.json, where a plain
 # `claude` would then ask Anthropic for an Ollama model. Put it back on exit.
-USER_MODEL=$("$REPO/.venv/bin/python" -m claude_ollama.ide --get-user-model 2>/dev/null || echo null)
+USER_MODEL=$(python3 -m claude_ollama.ide --get-user-model 2>/dev/null || echo null)
 
 STATUS=0
 if [ -n "$SESSION_SETTINGS" ]; then
@@ -136,5 +110,5 @@ if [ -n "$SESSION_SETTINGS" ]; then
 else
   claude "$@" || STATUS=$?
 fi
-"$REPO/.venv/bin/python" -m claude_ollama.ide --restore-user-model "$USER_MODEL" || true
+python3 -m claude_ollama.ide --restore-user-model "$USER_MODEL" || true
 exit "$STATUS"

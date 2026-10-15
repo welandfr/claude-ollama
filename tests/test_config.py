@@ -1,20 +1,24 @@
 """Config loading: .env parsing and the precedence rules."""
 
-import pytest
-
-from claude_ollama.config import Config, load, parse_env
+from claude_ollama.config import OBSOLETE, Config, load, obsolete_keys, parse_env
 
 SAMPLE = """
 # a comment
 OLLAMA_BASE_URL=http://box.lan:11434/
 
 export CLAUDE_OLLAMA_MODEL=qwen3:30b
-CLAUDE_OLLAMA_PORT=9000
-CLAUDE_OLLAMA_STRIP_THINKING=false
+CLAUDE_OLLAMA_NUM_CTX=32768
 QUOTED="http://quoted.example"
 TRAILING=value  # inline comment
 EMPTY=
 """
+
+KEYS = ("OLLAMA_BASE_URL", "CLAUDE_OLLAMA_MODEL", "CLAUDE_OLLAMA_NUM_CTX", "CLAUDE_OLLAMA_MAX_OUTPUT")
+
+
+def clear(monkeypatch):
+    for key in KEYS:
+        monkeypatch.delenv(key, raising=False)
 
 
 def test_parse_env_handles_comments_exports_and_quotes():
@@ -34,56 +38,40 @@ def write_env(tmp_path, text):
 
 
 def test_env_file_is_read(tmp_path, monkeypatch):
-    for key in list(vars(Config())):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    monkeypatch.delenv("CLAUDE_OLLAMA_MODEL", raising=False)
-    monkeypatch.delenv("CLAUDE_OLLAMA_PORT", raising=False)
-    monkeypatch.delenv("CLAUDE_OLLAMA_STRIP_THINKING", raising=False)
-
+    clear(monkeypatch)
     cfg = load(write_env(tmp_path, SAMPLE))
     assert cfg.base_url == "http://box.lan:11434"  # trailing slash trimmed
     assert cfg.default_model == "qwen3:30b"
-    assert cfg.port == 9000
-    assert cfg.strip_thinking is False
+    assert cfg.num_ctx == 32768
 
 
 def test_real_environment_beats_the_file(tmp_path, monkeypatch):
+    clear(monkeypatch)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://override:1234")
     cfg = load(write_env(tmp_path, SAMPLE))
     assert cfg.base_url == "http://override:1234"
     # Values not overridden still come from the file.
-    assert cfg.port == 9000
+    assert cfg.num_ctx == 32768
 
 
 def test_missing_file_falls_back_to_defaults(tmp_path, monkeypatch):
-    for key in ("OLLAMA_BASE_URL", "CLAUDE_OLLAMA_PORT", "CLAUDE_OLLAMA_NUM_CTX"):
-        monkeypatch.delenv(key, raising=False)
+    clear(monkeypatch)
     cfg = load(tmp_path / "nonexistent")
     assert cfg.base_url == Config.base_url
-    assert cfg.port == Config.port
     assert cfg.num_ctx == Config.num_ctx
+    assert cfg.max_output == Config.max_output
 
 
 def test_blank_value_falls_through_to_the_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_OLLAMA_PORT", raising=False)
-    cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_PORT=\n"))
-    assert cfg.port == Config.port
-
-
-def test_unparseable_number_keeps_the_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_OLLAMA_NUM_CTX", raising=False)
-    cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_NUM_CTX=lots\n"))
+    clear(monkeypatch)
+    cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_NUM_CTX=\n"))
     assert cfg.num_ctx == Config.num_ctx
 
 
-@pytest.mark.parametrize(
-    "value, expected", [("off", False), ("on", True), ("auto", None), ("nonsense", None)]
-)
-def test_thinking_values(tmp_path, monkeypatch, value, expected):
-    monkeypatch.delenv("CLAUDE_OLLAMA_THINKING", raising=False)
-    cfg = load(write_env(tmp_path, f"CLAUDE_OLLAMA_THINKING={value}\n"))
-    assert cfg.think_field() is expected
+def test_unparseable_number_keeps_the_default(tmp_path, monkeypatch):
+    clear(monkeypatch)
+    cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_NUM_CTX=lots\n"))
+    assert cfg.num_ctx == Config.num_ctx
 
 
 def test_example_file_matches_the_code():
@@ -99,47 +87,36 @@ def test_example_file_matches_the_code():
         "CLAUDE_OLLAMA_MODELS",
         "CLAUDE_OLLAMA_NUM_CTX",
         "CLAUDE_OLLAMA_MAX_OUTPUT",
-        "CLAUDE_OLLAMA_TEMPERATURE",
-        "CLAUDE_OLLAMA_THINKING",
-        "CLAUDE_OLLAMA_STRIP_THINKING",
-        "CLAUDE_OLLAMA_DEBUG",
-        "CLAUDE_OLLAMA_HOST",
-        "CLAUDE_OLLAMA_PORT",
     }
     assert keys == known
+    assert not keys & set(OBSOLETE)
 
 
-def test_only_env_decides_which_model_runs():
-    """A requested name not listed in .env must never override it.
-
-    Claude Code can ask for a model named in a stale settings file or persisted
-    from an earlier session; honouring that ran the wrong model silently.
-    """
-    cfg = Config(default_model="qwen3.5:9b", small_model="qwen3:1.7b")
-    assert cfg.resolve_model("claude-opus-5") == "qwen3.5:9b"
-    assert cfg.resolve_model(None) == "qwen3.5:9b"
-    # A leftover Ollama name is ignored, not passed through.
-    assert cfg.resolve_model("qwen3:8b") == "qwen3.5:9b"
-    assert cfg.resolve_model("llama3:70b") == "qwen3.5:9b"
-    # The cheap background calls are the one thing still routed by name.
-    assert cfg.resolve_model("claude-haiku-4-5-20251001") == "qwen3:1.7b"
-
-
-def test_haiku_falls_back_to_the_main_model_when_no_small_one_is_set():
-    cfg = Config(default_model="qwen3.5:9b", small_model="")
-    assert cfg.resolve_model("claude-haiku-4-5-20251001") == "qwen3.5:9b"
-
-
-def test_models_listed_in_env_are_honoured_by_name(tmp_path):
-    """/model sends the picked name verbatim; listed names must get through."""
+def test_models_list_is_parsed_default_first(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_OLLAMA_MODELS", raising=False)
     cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_MODEL=a:9b\nCLAUDE_OLLAMA_MODELS=b:8b, c:4b a:9b\n"))
     assert cfg.picker_models() == ["a:9b", "b:8b", "c:4b"]
-    assert cfg.resolve_model("b:8b") == "b:8b"
-    assert cfg.resolve_model("c:4b") == "c:4b"
-    # Still not a passthrough: unlisted names get the default.
-    assert cfg.resolve_model("qwen3:8b") == "a:9b"
 
 
-def test_no_extra_models_means_just_the_default(tmp_path):
+def test_no_extra_models_means_just_the_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_OLLAMA_MODELS", raising=False)
     cfg = load(write_env(tmp_path, "CLAUDE_OLLAMA_MODEL=a:9b\n"))
     assert cfg.picker_models() == ["a:9b"]
+
+
+def test_allowed_models_include_the_small_one():
+    cfg = Config(default_model="a:9b", small_model="s:1b", models=["b:8b"])
+    assert cfg.allowed_models() == {"a:9b", "b:8b", "s:1b"}
+
+
+def test_leftover_proxy_settings_are_pointed_out(tmp_path):
+    """An .env from the proxy era still parses; its dead keys are named."""
+    path = write_env(tmp_path, "CLAUDE_OLLAMA_PORT=8765\nCLAUDE_OLLAMA_THINKING=off\nCLAUDE_OLLAMA_MODEL=a:9b\n")
+    assert set(obsolete_keys(path)) == {"CLAUDE_OLLAMA_PORT", "CLAUDE_OLLAMA_THINKING"}
+
+
+def test_a_current_env_has_nothing_obsolete(tmp_path):
+    assert obsolete_keys(write_env(tmp_path, "CLAUDE_OLLAMA_MODEL=a:9b\n")) == {}
+    assert obsolete_keys(tmp_path / "missing") == {}

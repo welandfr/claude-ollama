@@ -16,8 +16,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = ROOT / ".env"
 
-TRUTHY = {"1", "true", "yes", "on"}
-FALSEY = {"0", "false", "no", "off"}
+# Settings of the proxy this project used to run between Claude Code and Ollama.
+# Ignored now; listed so a leftover .env can be pointed out rather than silently
+# half-applied.
+OBSOLETE = {
+    "CLAUDE_OLLAMA_HOST": "the proxy is gone; Claude Code talks to OLLAMA_BASE_URL directly",
+    "CLAUDE_OLLAMA_PORT": "the proxy is gone; Claude Code talks to OLLAMA_BASE_URL directly",
+    "CLAUDE_OLLAMA_TEMPERATURE": "Ollama's /v1/messages uses what Claude Code sends",
+    "CLAUDE_OLLAMA_THINKING": "Ollama's /v1/messages maps Claude Code's thinking setting itself",
+    "CLAUDE_OLLAMA_STRIP_THINKING": "Ollama returns reasoning in its own field",
+    "CLAUDE_OLLAMA_DEBUG": "read Ollama's server log instead",
+}
+
+
+def env_file() -> Path:
+    return Path(os.environ.get("CLAUDE_OLLAMA_ENV") or DEFAULT_ENV)
+
+
+def obsolete_keys(path: Path | None = None) -> dict[str, str]:
+    """Keys in the .env file that nothing reads any more, with why."""
+    target = path or env_file()
+    if not target.is_file():
+        return {}
+    present = parse_env(target.read_text())
+    return {key: why for key, why in OBSOLETE.items() if key in present}
 
 
 def parse_env(text: str) -> dict[str, str]:
@@ -47,18 +69,14 @@ def parse_env(text: str) -> dict[str, str]:
 class Config:
     base_url: str = "http://localhost:11434"
     timeout: float = 600.0
-    host: str = "127.0.0.1"
-    port: int = 8765
+    # The window Claude Code is told about. Ollama's own window is set on the
+    # server (OLLAMA_CONTEXT_LENGTH) and must be at least this large.
     num_ctx: int = 65536
     max_output: int = 8192
-    temperature: float = 0.0
-    thinking: str = "off"
-    strip_thinking: bool = True
     default_model: str = "ornith-1.5:9b"
     small_model: str = ""
     # Extra models offered in Claude Code's /model picker, beside default_model.
     models: list[str] = field(default_factory=list)
-    debug: bool = False
 
     def picker_models(self) -> list[str]:
         """The /model rows, default first, without duplicates."""
@@ -67,29 +85,9 @@ class Config:
     def allowed_models(self) -> set[str]:
         return {*self.picker_models(), *([self.small_model] if self.small_model else [])}
 
-    def resolve_model(self, requested: str | None) -> str:
-        """Which Ollama model to run for a requested model id.
-
-        A requested name is honoured only if .env lists it. Claude Code can ask
-        for a model from a stale settings file or a model choice persisted from
-        an earlier session, and an earlier version passed any name through
-        verbatim — so a leftover `qwen3:8b` silently ran qwen3:8b even though
-        .env said otherwise. Anything not listed gets the default.
-        """
-        name = (requested or "").strip()
-        if name in self.allowed_models():
-            return name
-        low = name.lower()
-        if self.small_model and ("haiku" in low or "small" in low):
-            return self.small_model
-        return self.default_model
-
-    def think_field(self) -> bool | None:
-        return {"off": False, "on": True}.get(self.thinking)
-
 
 def load(env_path: str | os.PathLike[str] | None = None) -> Config:
-    target = Path(env_path or os.environ.get("CLAUDE_OLLAMA_ENV") or DEFAULT_ENV)
+    target = Path(env_path) if env_path else env_file()
     from_file = parse_env(target.read_text()) if target.is_file() else {}
 
     def get(key: str, fallback: str) -> str:
@@ -105,29 +103,12 @@ def load(env_path: str | os.PathLike[str] | None = None) -> Config:
         except ValueError:
             return fallback
 
-    def flag(key: str, fallback: bool) -> bool:
-        value = get(key, "").lower()
-        if value in TRUTHY:
-            return True
-        if value in FALSEY:
-            return False
-        return fallback
-
-    cfg = Config(
+    return Config(
         base_url=get("OLLAMA_BASE_URL", Config.base_url).rstrip("/"),
         timeout=number("CLAUDE_OLLAMA_TIMEOUT", Config.timeout),
-        host=get("CLAUDE_OLLAMA_HOST", Config.host),
-        port=int(number("CLAUDE_OLLAMA_PORT", Config.port)),
         num_ctx=int(number("CLAUDE_OLLAMA_NUM_CTX", Config.num_ctx)),
         max_output=int(number("CLAUDE_OLLAMA_MAX_OUTPUT", Config.max_output)),
-        temperature=number("CLAUDE_OLLAMA_TEMPERATURE", Config.temperature),
-        thinking=get("CLAUDE_OLLAMA_THINKING", Config.thinking).lower(),
-        strip_thinking=flag("CLAUDE_OLLAMA_STRIP_THINKING", Config.strip_thinking),
         default_model=get("CLAUDE_OLLAMA_MODEL", Config.default_model),
         small_model=get("CLAUDE_OLLAMA_SMALL_MODEL", ""),
         models=get("CLAUDE_OLLAMA_MODELS", "").replace(",", " ").split(),
-        debug=flag("CLAUDE_OLLAMA_DEBUG", Config.debug),
     )
-    if cfg.thinking not in {"off", "on", "auto"}:
-        cfg.thinking = "auto"
-    return cfg

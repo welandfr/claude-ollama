@@ -1,4 +1,4 @@
-"""Writes the proxy's environment into a project's Claude Code settings.
+"""Writes the launcher's environment into a project's Claude Code settings.
 
 The `claude-ollama` launcher exports the right variables before starting Claude
 Code, but anything that spawns `claude` on its own — the VS Code extension, for
@@ -6,7 +6,7 @@ instance — gets none of them and falls back to a normal login. Claude Code rea
 an `env` block from settings.json whatever launched it, so writing the same
 values there covers those cases.
 
-Values come from the same loader the proxy uses, so .env stays the only place
+Values come from the same loader the launcher uses, so .env stays the only place
 settings are edited. Re-run this after changing .env.
 """
 
@@ -25,7 +25,9 @@ def env_block(cfg: config_module.Config) -> dict[str, str]:
     main_model = cfg.default_model
     small_model = cfg.small_model or cfg.default_model
     return {
-        "ANTHROPIC_BASE_URL": f"http://{cfg.host}:{cfg.port}",
+        # Ollama serves the Anthropic Messages API itself at /v1/messages.
+        "ANTHROPIC_BASE_URL": cfg.base_url,
+        # Non-empty so Claude Code does not ask for a login; Ollama ignores it.
         "ANTHROPIC_AUTH_TOKEN": "ollama",
         # Cleared so a real key in the environment cannot take precedence.
         "ANTHROPIC_API_KEY": "",
@@ -50,23 +52,6 @@ def env_block(cfg: config_module.Config) -> dict[str, str]:
         # claude.ai connectors run through Anthropic; off, and without the warning.
         "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
     }
-
-
-def service_unit(cfg: config_module.Config, repo: Path) -> str:
-    """A systemd user unit, so the proxy is up without a terminal open."""
-    return f"""[Unit]
-Description=claude-ollama proxy (Anthropic API over Ollama)
-After=network.target
-
-[Service]
-ExecStart={repo}/.venv/bin/python -m claude_ollama
-WorkingDirectory={repo}
-Restart=on-failure
-Environment=PYTHONPATH={repo}
-
-[Install]
-WantedBy=default.target
-"""
 
 
 def status_line(repo: Path) -> dict[str, str]:
@@ -147,7 +132,7 @@ def write_settings(target: Path, values: dict[str, str], shared: bool) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="claude-ollama-ide",
-        description="Point a project's Claude Code at the local Ollama proxy.",
+        description="Point a project's Claude Code at Ollama.",
     )
     parser.add_argument(
         "project", nargs="?", default=".", help="project directory (default: current)"
@@ -177,11 +162,6 @@ def main(argv: list[str] | None = None) -> int:
         metavar="JSON",
         help="put back a user-settings model recorded by --get-user-model",
     )
-    parser.add_argument(
-        "--print-service",
-        action="store_true",
-        help="print a systemd user unit for the proxy and exit",
-    )
     args = parser.parse_args(argv)
 
     cfg = config_module.load()
@@ -205,10 +185,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"restored the model in {path} (a /model pick had replaced it)")
         return 0
 
-    if args.print_service:
-        print(service_unit(cfg, config_module.ROOT), end="")
-        return 0
-
     target = Path(args.project).resolve()
     if not target.is_dir():
         raise SystemExit(f"not a directory: {target}")
@@ -226,7 +202,6 @@ def main(argv: list[str] | None = None) -> int:
         ignored = gitignore.is_file() and "settings.local.json" in gitignore.read_text()
         if not ignored:
             print("  note: add .claude/settings.local.json to that project's .gitignore")
-    print("\nThe proxy must be running for this to work — see README (systemd user unit).")
     return 0
 
 
